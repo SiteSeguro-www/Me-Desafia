@@ -10,6 +10,8 @@ export interface User {
   balance: number;
   followers: number;
   completedTasks: number;
+  pix_key?: string;
+  pix_type?: 'cpf' | 'email' | 'phone' | 'random';
   createdAt: any;
 }
 

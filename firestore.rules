@@ -43,7 +43,9 @@ service cloud.firestore {
              data.username is string && data.username.size() > 0 && data.username.size() < 50 &&
              data.display_name is string && data.display_name.size() > 0 && data.display_name.size() < 100 &&
              isValidEmail(data.email) &&
-             data.role in ['creator', 'follower'];
+             data.role in ['creator', 'follower'] &&
+             (!('pix_key' in data) || (data.pix_key is string && data.pix_key.size() < 100)) &&
+             (!('pix_type' in data) || (data.pix_type in ['cpf', 'email', 'phone', 'random']));
     }
 
     function isValidTask(data) {
@@ -83,12 +85,15 @@ service cloud.firestore {
 
     match /users/{userId} {
       // Allow reading public profile info, but protect PII (email)
-      // For simplicity in this demo, we allow authenticated users to read profiles for the ranking.
-      // In a real app, we'd split public/private data.
       allow read: if isAuthenticated(); 
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) &&
-                    request.resource.data.email == resource.data.email; // Email immutable
+      allow update: if isAuthenticated() && (
+        // Owner can update everything (validating schema)
+        (isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.email == resource.data.email) ||
+        // Others can increment balance (for payments)
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance']) && 
+         request.resource.data.balance >= resource.data.balance)
+      );
     }
 
     match /tasks/{taskId} {

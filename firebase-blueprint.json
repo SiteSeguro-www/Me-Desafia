@@ -2,7 +2,7 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "User profile information",
+      "description": "User profile information. Platform fee: 5% on earnings. Withdrawal fee: R$ 2,00.",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
@@ -16,6 +16,8 @@
         "balance": { "type": "number" },
         "followers": { "type": "integer" },
         "completedTasks": { "type": "integer" },
+        "pix_key": { "type": "string" },
+        "pix_type": { "type": "string", "enum": ["cpf", "email", "phone", "random"] },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "username", "display_name", "email", "role"]

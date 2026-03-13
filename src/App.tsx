@@ -43,7 +43,10 @@ import {
   Eye,
   LogOut,
   LogIn,
-  Play
+  Play,
+  Settings,
+  Radio,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -69,12 +72,37 @@ function App() {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showChallengeModal, setShowChallengeModal] = useState(false);
   const [showPostModal, setShowPostModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showCompleteModal, setShowCompleteModal] = useState<{id: string, title: string, type: 'task' | 'challenge'} | null>(null);
   const [newTask, setNewTask] = useState({ title: '', description: '', price: '' });
   const [newChallenge, setNewChallenge] = useState({ title: '', description: '', price: '' });
   const [newPost, setNewPost] = useState({ content: '', image_url: '' });
+  const [profileForm, setProfileForm] = useState({ display_name: '', bio: '', pix_key: '', pix_type: 'cpf' as 'cpf' | 'email' | 'phone' | 'random' });
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawStatus, setWithdrawStatus] = useState<{type: 'success' | 'error', message: string} | null>(null);
   const [completionData, setCompletionData] = useState({ video_url: '', thumbnail_url: '' });
+  const [completionMethod, setCompletionMethod] = useState<'video' | 'live'>('video');
+  const [showLivePanel, setShowLivePanel] = useState(false);
   const [viewMode, setViewMode] = useState<'creator' | 'follower'>('creator');
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (showLivePanel) {
+      navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        .then(stream => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+          }
+        })
+        .catch(err => console.error("Error accessing camera:", err));
+    } else {
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
+    }
+  }, [showLivePanel]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -255,13 +283,67 @@ function App() {
     }
   };
 
-  const handlePayment = async (taskId: string, price: number) => {
-    // Simplified payment logic
+  const handlePayment = async (taskId: string, price: number, creatorId: string) => {
+    // 5% platform fee
+    const platformFee = price * 0.05;
+    const creatorAmount = price - platformFee;
     const path = `tasks/${taskId}`;
     try {
       await updateDoc(doc(db, 'tasks', taskId), { status: 'paid' });
+      await updateDoc(doc(db, 'users', creatorId), {
+        balance: increment(creatorAmount)
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handlePayChallenge = async (challengeId: string, amount: number, creatorId: string) => {
+    // 5% platform fee
+    const platformFee = amount * 0.05;
+    const creatorAmount = amount - platformFee;
+    const path = `challenges/${challengeId}`;
+    try {
+      await updateDoc(doc(db, 'challenges', challengeId), { status: 'paid' });
+      await updateDoc(doc(db, 'users', creatorId), {
+        balance: increment(creatorAmount)
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handleWithdraw = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    const amount = parseFloat(withdrawAmount);
+    const fee = 2.00; // Fixed withdrawal fee
+    const totalDeduction = amount + fee;
+
+    if (amount <= 0) {
+      setWithdrawStatus({ type: 'error', message: "Valor inválido." });
+      return;
+    }
+
+    if (user.balance < totalDeduction) {
+      setWithdrawStatus({ type: 'error', message: "Saldo insuficiente. Lembre-se da taxa de saque de R$ 2,00." });
+      return;
+    }
+
+    const path = `users/${user.uid}`;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        balance: increment(-totalDeduction)
+      });
+      setWithdrawStatus({ type: 'success', message: `Saque de R$ ${amount.toFixed(2)} solicitado com sucesso! Taxa de R$ 2,00 aplicada.` });
+      setWithdrawAmount('');
+      setTimeout(() => {
+        setShowWithdrawModal(false);
+        setWithdrawStatus(null);
+      }, 3000);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+      setWithdrawStatus({ type: 'error', message: "Erro ao processar saque. Tente novamente." });
     }
   };
 
@@ -295,6 +377,69 @@ function App() {
       setNewPost({ content: '', image_url: '' });
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  useEffect(() => {
+    if (user && showProfileModal) {
+      setProfileForm({
+        display_name: user.display_name,
+        bio: user.bio,
+        pix_key: user.pix_key || '',
+        pix_type: user.pix_type || 'cpf'
+      });
+    }
+  }, [user, showProfileModal]);
+
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    const path = `users/${user.uid}`;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        display_name: profileForm.display_name,
+        bio: profileForm.bio,
+        pix_key: profileForm.pix_key,
+        pix_type: profileForm.pix_type
+      });
+      setShowProfileModal(false);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handleCompleteViaLive = async () => {
+    if (!user || !showCompleteModal) return;
+    
+    const { id, title, type } = showCompleteModal;
+    const collectionName = type === 'task' ? 'tasks' : 'challenges';
+    const path = `${collectionName}/${id}`;
+    const videosPath = 'completed_videos';
+
+    try {
+      await updateDoc(doc(db, collectionName, id), { 
+        status: 'completed',
+        video_url: 'LIVE_STREAM_COMPLETED'
+      });
+
+      await addDoc(collection(db, videosPath), {
+        userId: user.uid,
+        challengeId: id,
+        title: title,
+        video_url: 'LIVE_STREAM_COMPLETED',
+        thumbnail_url: `https://picsum.photos/seed/${id}/400/225`,
+        created_at: serverTimestamp()
+      });
+
+      await updateDoc(doc(db, 'users', user.uid), {
+        completedTasks: increment(1),
+        points: increment(100)
+      });
+
+      setShowLivePanel(false);
+      setShowCompleteModal(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
   };
 
@@ -418,6 +563,13 @@ function App() {
                 </button>
               </div>
               <button 
+                onClick={() => setShowProfileModal(true)}
+                className="p-2 text-zinc-500 hover:text-emerald-400 transition-colors"
+                title="Configurações de Perfil"
+              >
+                <Settings size={20} />
+              </button>
+              <button 
                 onClick={handleLogout}
                 className="p-2 text-zinc-500 hover:text-red-400 transition-colors"
                 title="Sair"
@@ -449,14 +601,28 @@ function App() {
                 </div>
               )}
             </div>
-            <div className="flex-1 text-center sm:text-left z-10">
-              <div className="flex items-center justify-center sm:justify-start gap-3 mb-2">
-                <h2 className="text-3xl font-black tracking-tight">{user.display_name}</h2>
-                <ShieldCheck className="text-emerald-400" size={20} />
+              <div className="flex-1 text-center sm:text-left z-10">
+                <div className="flex items-center justify-center sm:justify-start gap-3 mb-2">
+                  <h2 className="text-3xl font-black tracking-tight">{user.display_name}</h2>
+                  <ShieldCheck className="text-emerald-400" size={20} />
+                </div>
+                <p className="text-zinc-500 font-mono text-sm mb-4 tracking-tight">@{user.username}</p>
+                <p className="text-zinc-300 leading-relaxed text-lg font-medium max-w-md">Pague e veja se eu consigo cumprir.</p>
+                
+                <div className="mt-6 flex flex-wrap gap-3 justify-center sm:justify-start">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-2xl">
+                    <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Saldo Disponível</p>
+                    <p className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</p>
+                  </div>
+                  <button 
+                    onClick={() => setShowWithdrawModal(true)}
+                    className="bg-white text-zinc-950 px-6 py-2 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
+                  >
+                    <DollarSign size={16} />
+                    Sacar
+                  </button>
+                </div>
               </div>
-              <p className="text-zinc-500 font-mono text-sm mb-4 tracking-tight">@{user.username}</p>
-              <p className="text-zinc-300 leading-relaxed text-lg font-medium max-w-md">Pague e veja se eu consigo cumprir.</p>
-            </div>
           </div>
 
           {/* Stats Column */}
@@ -678,7 +844,7 @@ function App() {
                         <div className="text-3xl font-black text-white tabular-nums">R$ {task.price.toFixed(2)}</div>
                         {viewMode === 'follower' && task.status === 'pending' && (
                           <button 
-                            onClick={() => handlePayment(task.id, task.price)}
+                            onClick={() => handlePayment(task.id, task.price, task.creatorId)}
                             className="bg-white text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all"
                           >
                             Pagar Agora
@@ -733,11 +899,15 @@ function App() {
                       <div className="flex-1 text-center sm:text-left">
                         <div className="flex items-center justify-center sm:justify-start gap-3 mb-3">
                           <span className={`text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${
-                            challenge.status === 'accepted' ? 'bg-emerald-500/20 text-emerald-400' : 
+                            challenge.status === 'accepted' ? 'bg-blue-500/20 text-blue-400' : 
+                            challenge.status === 'paid' ? 'bg-emerald-500/20 text-emerald-400' : 
                             challenge.status === 'refused' ? 'bg-red-500/20 text-red-400' : 
                             'bg-zinc-800 text-zinc-500'
                           }`}>
-                            {challenge.status === 'pending' ? 'Novo Desafio' : challenge.status === 'accepted' ? 'Aceito' : 'Recusado'}
+                            {challenge.status === 'pending' ? 'Novo Desafio' : 
+                             challenge.status === 'accepted' ? 'Aceito' : 
+                             challenge.status === 'paid' ? 'Pago' : 
+                             'Recusado'}
                           </span>
                           <span className="text-xs text-zinc-600 font-bold">por @{challenge.follower_username}</span>
                         </div>
@@ -791,7 +961,16 @@ function App() {
                           </div>
                         )}
                         
-                        {viewMode === 'creator' && challenge.status === 'accepted' && (
+                        {viewMode === 'follower' && challenge.status === 'accepted' && (
+                          <button 
+                            onClick={() => handlePayChallenge(challenge.id, challenge.price + (challenge.total_raised || 0), challenge.creatorId)}
+                            className="bg-white text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all"
+                          >
+                            Pagar Agora
+                          </button>
+                        )}
+
+                        {viewMode === 'creator' && challenge.status === 'paid' && (
                           <button 
                             onClick={() => setShowCompleteModal({ id: challenge.id, title: challenge.title, type: 'challenge' })}
                             className="bg-emerald-500 text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
@@ -801,10 +980,17 @@ function App() {
                           </button>
                         )}
                         
-                        {challenge.status === 'accepted' && viewMode === 'follower' && (
+                        {challenge.status === 'paid' && viewMode === 'follower' && (
                           <div className="text-emerald-400 text-xs font-black uppercase tracking-widest flex items-center gap-2">
                             <CheckCircle2 size={16} />
-                            Aceito
+                            Pago
+                          </div>
+                        )}
+                        
+                        {challenge.status === 'accepted' && viewMode === 'follower' && (
+                          <div className="text-blue-400 text-xs font-black uppercase tracking-widest flex items-center gap-2">
+                            <CheckCircle2 size={16} />
+                            Aguardando Pagamento
                           </div>
                         )}
                         {challenge.status === 'refused' && (
@@ -1163,6 +1349,179 @@ function App() {
         )}
       </AnimatePresence>
 
+      {/* Profile Editor Modal */}
+      <AnimatePresence>
+        {showProfileModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowProfileModal(false)}
+              className="absolute inset-0 bg-zinc-950/80 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <h3 className="text-3xl font-black mb-2 tracking-tight">EDITAR PERFIL</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">Atualize suas informações e dados de recebimento.</p>
+              
+              <form onSubmit={handleUpdateProfile} className="space-y-6">
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">Nome de Exibição</label>
+                  <input 
+                    required
+                    type="text" 
+                    value={profileForm.display_name}
+                    onChange={e => setProfileForm({...profileForm, display_name: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">Bio</label>
+                  <textarea 
+                    value={profileForm.bio}
+                    onChange={e => setProfileForm({...profileForm, bio: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold resize-none h-24"
+                  />
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">Tipo de PIX</label>
+                    <select 
+                      value={profileForm.pix_type}
+                      onChange={e => setProfileForm({...profileForm, pix_type: e.target.value as any})}
+                      className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold appearance-none"
+                    >
+                      <option value="cpf">CPF</option>
+                      <option value="email">E-mail</option>
+                      <option value="phone">Telefone</option>
+                      <option value="random">Chave Aleatória</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">Chave PIX</label>
+                    <input 
+                      type="text" 
+                      value={profileForm.pix_key}
+                      onChange={e => setProfileForm({...profileForm, pix_key: e.target.value})}
+                      className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                      placeholder="Sua chave aqui"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-6 flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => setShowProfileModal(false)}
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
+                  >
+                    Salvar Alterações
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Withdraw Modal */}
+      <AnimatePresence>
+        {showWithdrawModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowWithdrawModal(false)}
+              className="absolute inset-0 bg-zinc-950/80 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <h3 className="text-3xl font-black mb-2 tracking-tight">SOLICITAR SAQUE</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">O valor será enviado para sua chave PIX configurada.</p>
+              
+              <div className="bg-zinc-950 p-6 rounded-3xl border border-zinc-800 mb-8">
+                <div className="flex justify-between items-center mb-4">
+                  <span className="text-zinc-500 text-xs font-black uppercase tracking-widest">Saldo Atual</span>
+                  <span className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between items-center text-emerald-400">
+                  <span className="text-xs font-black uppercase tracking-widest">Chave PIX</span>
+                  <span className="text-sm font-bold">{user.pix_key || 'Não configurada'}</span>
+                </div>
+              </div>
+
+              <form onSubmit={handleWithdraw} className="space-y-6">
+                {withdrawStatus && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`p-4 rounded-2xl text-xs font-bold uppercase tracking-widest text-center ${
+                      withdrawStatus.type === 'success' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/20 text-red-400 border border-red-500/20'
+                    }`}
+                  >
+                    {withdrawStatus.message}
+                  </motion.div>
+                )}
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">Valor do Saque (R$)</label>
+                  <input 
+                    required
+                    type="number" 
+                    step="0.01"
+                    value={withdrawAmount}
+                    onChange={e => setWithdrawAmount(e.target.value)}
+                    placeholder="0,00"
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold text-2xl"
+                  />
+                  <p className="mt-3 text-[10px] text-zinc-500 font-bold uppercase tracking-widest">
+                    Taxa de saque: <span className="text-white">R$ 2,00</span>
+                  </p>
+                </div>
+
+                <div className="pt-6 flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => setShowWithdrawModal(false)}
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    type="submit"
+                    disabled={!user.pix_key}
+                    className="flex-1 bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
+                  >
+                    Confirmar Saque
+                  </button>
+                </div>
+                {!user.pix_key && (
+                  <p className="text-center text-red-400 text-[10px] font-black uppercase tracking-widest">
+                    Configure sua chave PIX nas configurações antes de sacar.
+                  </p>
+                )}
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Complete Challenge Modal */}
       <AnimatePresence>
         {showCompleteModal && (
@@ -1180,48 +1539,187 @@ function App() {
               exit={{ opacity: 0, scale: 0.9, y: 40 }}
               className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
             >
-              <h3 className="text-3xl font-black mb-2 tracking-tight">CONCLUIR DESAFIO</h3>
-              <p className="text-zinc-500 text-sm font-medium mb-8">Envie o link do vídeo como prova da conclusão.</p>
+              <h3 className="text-3xl font-black mb-2 tracking-tight uppercase">Concluir Missão</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">Escolha como deseja provar a conclusão.</p>
+
+              <div className="flex gap-4 mb-8">
+                <button 
+                  onClick={() => setCompletionMethod('video')}
+                  className={`flex-1 p-4 rounded-2xl border-2 transition-all flex flex-col items-center gap-2 ${
+                    completionMethod === 'video' 
+                    ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400' 
+                    : 'border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-zinc-700'
+                  }`}
+                >
+                  <Video size={24} />
+                  <span className="text-[10px] font-black uppercase tracking-widest">Vídeo</span>
+                </button>
+                <button 
+                  onClick={() => setCompletionMethod('live')}
+                  className={`flex-1 p-4 rounded-2xl border-2 transition-all flex flex-col items-center gap-2 ${
+                    completionMethod === 'live' 
+                    ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400' 
+                    : 'border-zinc-800 bg-zinc-950 text-zinc-500 hover:border-zinc-700'
+                  }`}
+                >
+                  <Radio size={24} />
+                  <span className="text-[10px] font-black uppercase tracking-widest">Ao Vivo</span>
+                </button>
+              </div>
               
-              <form onSubmit={handleCompleteChallenge} className="space-y-6">
-                <div>
-                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL do Vídeo (YouTube/Vimeo/etc)</label>
-                  <input 
-                    required
-                    type="url" 
-                    value={completionData.video_url}
-                    onChange={e => setCompletionData({...completionData, video_url: e.target.value})}
-                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
-                    placeholder="https://youtube.com/watch?v=..."
-                  />
+              {completionMethod === 'video' ? (
+                <form onSubmit={handleCompleteChallenge} className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL do Vídeo (YouTube/Vimeo/etc)</label>
+                    <input 
+                      required
+                      type="url" 
+                      value={completionData.video_url}
+                      onChange={e => setCompletionData({...completionData, video_url: e.target.value})}
+                      className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                      placeholder="https://youtube.com/watch?v=..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL da Thumbnail (Opcional)</label>
+                    <input 
+                      type="url" 
+                      value={completionData.thumbnail_url}
+                      onChange={e => setCompletionData({...completionData, thumbnail_url: e.target.value})}
+                      className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                      placeholder="https://exemplo.com/thumb.jpg"
+                    />
+                  </div>
+                  <div className="pt-6 flex gap-4">
+                    <button 
+                      type="button"
+                      onClick={() => setShowCompleteModal(null)}
+                      className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                    >
+                      Cancelar
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
+                    >
+                      Salvar Prova
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="space-y-6 text-center">
+                  <div className="py-10 bg-zinc-950 rounded-3xl border-2 border-dashed border-zinc-800 flex flex-col items-center gap-4">
+                    <div className="w-16 h-16 bg-emerald-500/10 rounded-full flex items-center justify-center text-emerald-500 animate-pulse">
+                      <Radio size={32} />
+                    </div>
+                    <p className="text-zinc-400 font-medium px-8">
+                      Inicie uma live para provar a conclusão em tempo real para seus seguidores.
+                    </p>
+                  </div>
+                  <div className="pt-6 flex gap-4">
+                    <button 
+                      type="button"
+                      onClick={() => setShowCompleteModal(null)}
+                      className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                    >
+                      Cancelar
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setShowLivePanel(true);
+                        // We keep showCompleteModal open or close it?
+                        // Usually better to close it and open the live panel
+                        // setShowCompleteModal(null);
+                      }}
+                      className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
+                    >
+                      <Play size={16} />
+                      Iniciar Live
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL da Thumbnail (Opcional)</label>
-                  <input 
-                    type="url" 
-                    value={completionData.thumbnail_url}
-                    onChange={e => setCompletionData({...completionData, thumbnail_url: e.target.value})}
-                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
-                    placeholder="https://exemplo.com/thumb.jpg"
-                  />
-                </div>
-                <div className="pt-6 flex gap-4">
-                  <button 
-                    type="button"
-                    onClick={() => setShowCompleteModal(null)}
-                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
-                  >
-                    Cancelar
-                  </button>
-                  <button 
-                    type="submit"
-                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
-                  >
-                    Salvar Prova
-                  </button>
-                </div>
-              </form>
+              )}
             </motion.div>
+          </div>
+        )}
+
+        {showLivePanel && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black">
+            <div className="relative w-full h-full flex flex-col">
+              {/* Video Background */}
+              <video 
+                ref={videoRef}
+                autoPlay 
+                playsInline 
+                muted
+                className="absolute inset-0 w-full h-full object-cover"
+              />
+              
+              {/* Overlay UI */}
+              <div className="relative z-10 flex-1 flex flex-col p-6">
+                <div className="flex justify-between items-start">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-red-600 text-white px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest animate-pulse flex items-center gap-2">
+                      <Radio size={12} />
+                      Ao Vivo
+                    </div>
+                    <div className="bg-black/40 backdrop-blur-md text-white px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest flex items-center gap-2">
+                      <Users size={12} />
+                      1.2k
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowLivePanel(false)}
+                    className="p-2 bg-black/40 backdrop-blur-md text-white rounded-full hover:bg-black/60 transition-all"
+                  >
+                    <XCircle size={24} />
+                  </button>
+                </div>
+
+                <div className="flex-1" />
+
+                <div className="max-w-md space-y-4">
+                  <div className="bg-black/40 backdrop-blur-md p-6 rounded-[2rem] border border-white/10">
+                    <h2 className="text-xl font-black text-white mb-1 uppercase tracking-tight">
+                      {showCompleteModal?.title}
+                    </h2>
+                    <p className="text-white/60 text-xs font-medium">
+                      Cumprindo missão ao vivo para os seguidores.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={handleCompleteViaLive}
+                      className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle2 size={18} />
+                      Finalizar e Concluir Missão
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Chat Simulation */}
+              <div className="absolute right-6 bottom-32 w-64 space-y-2 pointer-events-none">
+                {[
+                  { user: 'lucas_dev', msg: 'VAI QUE É TUA! 🔥' },
+                  { user: 'ana_clara', msg: 'Incrível! 🚀' },
+                  { user: 'pedro_henrique', msg: 'Pagamento enviado! ✅' }
+                ].map((chat, i) => (
+                  <motion.div 
+                    key={i}
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.5 }}
+                    className="bg-black/40 backdrop-blur-md p-3 rounded-2xl border border-white/5"
+                  >
+                    <span className="text-emerald-400 font-black text-[10px] block">@{chat.user}</span>
+                    <p className="text-white text-[11px] font-medium">{chat.msg}</p>
+                  </motion.div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </AnimatePresence>
