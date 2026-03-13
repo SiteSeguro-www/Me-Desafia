@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Task, Challenge, RankingUser } from './types';
+import { User, Task, Challenge, RankingUser, Post, CompletedVideo } from './types';
 import { 
   auth, 
   db, 
@@ -42,7 +42,8 @@ import {
   List,
   Eye,
   LogOut,
-  LogIn
+  LogIn,
+  Play
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -59,14 +60,20 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [challenges, setChallenges] = useState<Challenge[]>([]);
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [completedVideos, setCompletedVideos] = useState<CompletedVideo[]>([]);
   const [isLive, setIsLive] = useState(false);
-  const [activeTab, setActiveTab] = useState<'feed' | 'tasks' | 'challenges' | 'ranking'>('feed');
+  const [activeTab, setActiveTab] = useState<'feed' | 'tasks' | 'challenges' | 'ranking' | 'videos'>('feed');
   const [ranking, setRanking] = useState<RankingUser[]>([]);
   const [rankingSort, setRankingSort] = useState<'challenges_completed' | 'total_earned' | 'follower_count'>('challenges_completed');
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [showChallengeModal, setShowChallengeModal] = useState(false);
+  const [showPostModal, setShowPostModal] = useState(false);
+  const [showCompleteModal, setShowCompleteModal] = useState<{id: string, title: string, type: 'task' | 'challenge'} | null>(null);
   const [newTask, setNewTask] = useState({ title: '', description: '', price: '' });
   const [newChallenge, setNewChallenge] = useState({ title: '', description: '', price: '' });
+  const [newPost, setNewPost] = useState({ content: '', image_url: '' });
+  const [completionData, setCompletionData] = useState({ video_url: '', thumbnail_url: '' });
   const [viewMode, setViewMode] = useState<'creator' | 'follower'>('creator');
 
   useEffect(() => {
@@ -150,10 +157,32 @@ function App() {
       handleFirestoreError(error, OperationType.LIST, usersPath);
     });
 
+    // Listen to posts
+    const postsPath = 'posts';
+    const qPosts = query(collection(db, postsPath), orderBy('created_at', 'desc'));
+    const unsubPosts = onSnapshot(qPosts, (snapshot) => {
+      const postsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Post));
+      setPosts(postsData);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, postsPath);
+    });
+
+    // Listen to completed videos
+    const videosPath = 'completed_videos';
+    const qVideos = query(collection(db, videosPath), orderBy('created_at', 'desc'));
+    const unsubVideos = onSnapshot(qVideos, (snapshot) => {
+      const videosData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as CompletedVideo));
+      setCompletedVideos(videosData);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, videosPath);
+    });
+
     return () => {
       unsubTasks();
       unsubChallenges();
       unsubRanking();
+      unsubPosts();
+      unsubVideos();
     };
   }, [user]);
 
@@ -247,6 +276,78 @@ function App() {
     }
   };
 
+  const handleCreatePost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    const path = 'posts';
+    try {
+      await addDoc(collection(db, path), {
+        userId: user.uid,
+        username: user.username,
+        display_name: user.display_name,
+        avatar_url: user.avatar_url,
+        content: newPost.content,
+        image_url: newPost.image_url || null,
+        likes: 0,
+        created_at: serverTimestamp()
+      });
+      setShowPostModal(false);
+      setNewPost({ content: '', image_url: '' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  const handleLikePost = async (postId: string) => {
+    const path = `posts/${postId}`;
+    try {
+      await updateDoc(doc(db, 'posts', postId), {
+        likes: increment(1)
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handleCompleteChallenge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !showCompleteModal) return;
+    
+    const { id, title, type } = showCompleteModal;
+    const collectionName = type === 'task' ? 'tasks' : 'challenges';
+    const path = `${collectionName}/${id}`;
+    const videosPath = 'completed_videos';
+
+    try {
+      // 1. Update status to completed
+      await updateDoc(doc(db, collectionName, id), { 
+        status: 'completed',
+        video_url: completionData.video_url
+      });
+
+      // 2. Add to completed videos collection
+      await addDoc(collection(db, videosPath), {
+        userId: user.uid,
+        challengeId: id,
+        title: title,
+        video_url: completionData.video_url,
+        thumbnail_url: completionData.thumbnail_url || `https://picsum.photos/seed/${id}/400/225`,
+        created_at: serverTimestamp()
+      });
+
+      // 3. Update user stats
+      await updateDoc(doc(db, 'users', user.uid), {
+        completedTasks: increment(1),
+        points: increment(100)
+      });
+
+      setShowCompleteModal(null);
+      setCompletionData({ video_url: '', thumbnail_url: '' });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
   if (loading) return <div className="flex items-center justify-center h-screen bg-zinc-950 text-white font-mono">INITIALIZING_SYSTEM...</div>;
 
   if (!user) {
@@ -288,6 +389,7 @@ function App() {
               <button onClick={() => setActiveTab('feed')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'feed' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Feed</button>
               <button onClick={() => setActiveTab('tasks')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'tasks' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Minhas Missões</button>
               <button onClick={() => setActiveTab('challenges')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'challenges' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Duvido Você?</button>
+              <button onClick={() => setActiveTab('videos')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'videos' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Vídeos</button>
               <button onClick={() => setActiveTab('ranking')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'ranking' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Ranking</button>
             </nav>
           </div>
@@ -385,6 +487,7 @@ function App() {
           <button onClick={() => setActiveTab('feed')} className={`flex-shrink-0 px-6 py-3 rounded-xl text-xs font-black tracking-widest transition-all ${activeTab === 'feed' ? 'bg-zinc-800 text-white' : 'text-zinc-500'}`}>FEED</button>
           <button onClick={() => setActiveTab('tasks')} className={`flex-shrink-0 px-6 py-3 rounded-xl text-xs font-black tracking-widest transition-all ${activeTab === 'tasks' ? 'bg-zinc-800 text-white' : 'text-zinc-500'}`}>MISSÕES</button>
           <button onClick={() => setActiveTab('challenges')} className={`flex-shrink-0 px-6 py-3 rounded-xl text-xs font-black tracking-widest transition-all ${activeTab === 'challenges' ? 'bg-zinc-800 text-white' : 'text-zinc-500'}`}>DUVIDO?</button>
+          <button onClick={() => setActiveTab('videos')} className={`flex-shrink-0 px-6 py-3 rounded-xl text-xs font-black tracking-widest transition-all ${activeTab === 'videos' ? 'bg-zinc-800 text-white' : 'text-zinc-500'}`}>VÍDEOS</button>
           <button onClick={() => setActiveTab('ranking')} className={`flex-shrink-0 px-6 py-3 rounded-xl text-xs font-black tracking-widest transition-all ${activeTab === 'ranking' ? 'bg-zinc-800 text-white' : 'text-zinc-500'}`}>RANKING</button>
         </div>
 
@@ -401,17 +504,20 @@ function App() {
               <div className="flex items-center justify-between">
                 <h3 className="text-xl font-black tracking-tight flex items-center gap-2">
                   <Eye className="text-emerald-400" size={20} />
-                  TRANSMISSÃO AO VIVO
+                  FEED DA COMUNIDADE
                 </h3>
-                <div className="flex items-center gap-4">
-                  {viewMode === 'follower' && (
-                    <button 
-                      onClick={() => setShowChallengeModal(true)}
-                      className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all shadow-[0_0_30px_rgba(16,185,129,0.4)] animate-pulse"
-                    >
-                      DESAFIE AGORA
-                    </button>
-                  )}
+                <button 
+                  onClick={() => setShowPostModal(true)}
+                  className="bg-zinc-900 hover:bg-zinc-800 text-white px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest border border-zinc-800 transition-all"
+                >
+                  NOVA POSTAGEM
+                </button>
+              </div>
+
+              {/* Live Stream Section (kept as part of feed) */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-black text-zinc-500 uppercase tracking-widest">Transmissão ao Vivo</h4>
                   {isLive && (
                     <div className="flex items-center gap-2">
                       <div className="w-2 h-2 bg-red-500 rounded-full animate-ping" />
@@ -419,52 +525,106 @@ function App() {
                     </div>
                   )}
                 </div>
+                
+                {isLive ? (
+                  <div className="aspect-video bg-zinc-900 rounded-[3rem] overflow-hidden relative border-4 border-zinc-800 group shadow-2xl">
+                    <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="relative">
+                        <Video size={80} className="text-zinc-800 group-hover:text-emerald-500/20 transition-colors duration-500" />
+                        <motion.div 
+                          animate={{ scale: [1, 1.2, 1] }}
+                          transition={{ repeat: Infinity, duration: 2 }}
+                          className="absolute inset-0 bg-emerald-500/5 blur-3xl"
+                        />
+                      </div>
+                    </div>
+                    
+                    <div className="absolute bottom-8 left-8 right-8 flex items-end justify-between">
+                      <div className="space-y-4 max-w-xs">
+                        <div className="flex -space-x-3">
+                          {[1,2,3,4].map(i => (
+                            <img key={i} src={`https://picsum.photos/seed/user${i}/40`} className="w-10 h-10 rounded-full border-2 border-zinc-900" referrerPolicy="no-referrer" />
+                          ))}
+                          <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-zinc-900 flex items-center justify-center text-[10px] font-bold">+1.4k</div>
+                        </div>
+                        <div className="bg-white/10 backdrop-blur-xl p-4 rounded-2xl border border-white/10">
+                          <p className="text-xs font-black text-emerald-400 uppercase tracking-widest mb-1">Último Desafio Pago</p>
+                          <p className="text-sm font-bold">"Fazer 20 flexões agora!" - R$ 50,00</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-3">
+                        <button className="p-4 bg-white/10 backdrop-blur-xl rounded-2xl hover:bg-emerald-500 hover:text-zinc-950 transition-all group">
+                          <Heart size={24} className="group-active:scale-150 transition-transform" />
+                        </button>
+                        <button className="p-4 bg-white/10 backdrop-blur-xl rounded-2xl hover:bg-emerald-500 hover:text-zinc-950 transition-all">
+                          <MessageSquare size={24} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-12 text-center border-4 border-dashed border-zinc-900 rounded-[2rem] bg-zinc-900/20">
+                    <VideoOff size={48} className="mx-auto mb-4 text-zinc-800" />
+                    <p className="text-zinc-600 font-bold uppercase tracking-widest text-xs">Nenhuma live ativa no momento</p>
+                  </div>
+                )}
               </div>
 
-              {isLive ? (
-                <div className="aspect-video bg-zinc-900 rounded-[3rem] overflow-hidden relative border-4 border-zinc-800 group shadow-2xl">
-                  <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-transparent to-transparent opacity-60" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="relative">
-                      <Video size={80} className="text-zinc-800 group-hover:text-emerald-500/20 transition-colors duration-500" />
-                      <motion.div 
-                        animate={{ scale: [1, 1.2, 1] }}
-                        transition={{ repeat: Infinity, duration: 2 }}
-                        className="absolute inset-0 bg-emerald-500/5 blur-3xl"
-                      />
-                    </div>
+              {/* Posts Section */}
+              <div className="space-y-6">
+                <h4 className="text-sm font-black text-zinc-500 uppercase tracking-widest">Postagens Recentes</h4>
+                {posts.length === 0 ? (
+                  <div className="py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
+                    <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhuma postagem ainda</p>
                   </div>
-                  
-                  <div className="absolute bottom-8 left-8 right-8 flex items-end justify-between">
-                    <div className="space-y-4 max-w-xs">
-                      <div className="flex -space-x-3">
-                        {[1,2,3,4].map(i => (
-                          <img key={i} src={`https://picsum.photos/seed/user${i}/40`} className="w-10 h-10 rounded-full border-2 border-zinc-900" referrerPolicy="no-referrer" />
-                        ))}
-                        <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-zinc-900 flex items-center justify-center text-[10px] font-bold">+1.4k</div>
+                ) : (
+                  posts.map(post => (
+                    <motion.div 
+                      key={post.id}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-zinc-900/50 border border-zinc-800 rounded-[2.5rem] overflow-hidden group hover:border-emerald-500/30 transition-all"
+                    >
+                      <div className="p-8">
+                        <div className="flex items-center gap-4 mb-6">
+                          <div className="w-12 h-12 rounded-2xl overflow-hidden border-2 border-zinc-800">
+                            <img src={post.avatar_url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          </div>
+                          <div>
+                            <h5 className="font-black text-white">{post.display_name}</h5>
+                            <p className="text-zinc-500 font-mono text-xs">@{post.username}</p>
+                          </div>
+                          <div className="ml-auto text-[10px] text-zinc-600 font-bold uppercase tracking-widest">
+                            {post.created_at ? new Date(post.created_at.seconds * 1000).toLocaleDateString() : 'Agora'}
+                          </div>
+                        </div>
+                        <p className="text-zinc-200 text-lg font-medium leading-relaxed mb-6">
+                          {post.content}
+                        </p>
+                        {post.image_url && (
+                          <div className="rounded-3xl overflow-hidden border border-zinc-800 mb-6">
+                            <img src={post.image_url} className="w-full h-auto" referrerPolicy="no-referrer" />
+                          </div>
+                        )}
+                        <div className="flex items-center gap-6">
+                          <button 
+                            onClick={() => handleLikePost(post.id)}
+                            className="flex items-center gap-2 text-zinc-500 hover:text-emerald-400 transition-colors group/like"
+                          >
+                            <Heart size={20} className="group-active/like:scale-150 transition-transform" />
+                            <span className="text-sm font-black tabular-nums">{post.likes}</span>
+                          </button>
+                          <button className="flex items-center gap-2 text-zinc-500 hover:text-emerald-400 transition-colors">
+                            <MessageSquare size={20} />
+                            <span className="text-sm font-black tabular-nums">0</span>
+                          </button>
+                        </div>
                       </div>
-                      <div className="bg-white/10 backdrop-blur-xl p-4 rounded-2xl border border-white/10">
-                        <p className="text-xs font-black text-emerald-400 uppercase tracking-widest mb-1">Último Desafio Pago</p>
-                        <p className="text-sm font-bold">"Fazer 20 flexões agora!" - R$ 50,00</p>
-                      </div>
-                    </div>
-                    <div className="flex flex-col gap-3">
-                      <button className="p-4 bg-white/10 backdrop-blur-xl rounded-2xl hover:bg-emerald-500 hover:text-zinc-950 transition-all group">
-                        <Heart size={24} className="group-active:scale-150 transition-transform" />
-                      </button>
-                      <button className="p-4 bg-white/10 backdrop-blur-xl rounded-2xl hover:bg-emerald-500 hover:text-zinc-950 transition-all">
-                        <MessageSquare size={24} />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="py-32 text-center border-4 border-dashed border-zinc-900 rounded-[3rem] bg-zinc-900/20">
-                  <VideoOff size={64} className="mx-auto mb-6 text-zinc-800" />
-                  <h4 className="text-xl font-bold text-zinc-400 mb-2">Sistema Offline</h4>
-                  <p className="text-zinc-600 font-medium">Inicie uma live para interagir com seus seguidores.</p>
-                </div>
-              )}
+                    </motion.div>
+                  ))
+                )}
+              </div>
             </motion.div>
           )}
 
@@ -525,10 +685,13 @@ function App() {
                           </button>
                         )}
                         {viewMode === 'creator' && task.status === 'paid' && (
-                          <div className="text-emerald-400 flex items-center gap-2 text-sm font-black uppercase tracking-widest">
+                          <button 
+                            onClick={() => setShowCompleteModal({ id: task.id, title: task.title, type: 'task' })}
+                            className="bg-emerald-500 text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
+                          >
                             <CheckCircle2 size={18} />
-                            Realizar
-                          </div>
+                            Concluir
+                          </button>
                         )}
                       </div>
                     </div>
@@ -628,7 +791,17 @@ function App() {
                           </div>
                         )}
                         
-                        {challenge.status === 'accepted' && (
+                        {viewMode === 'creator' && challenge.status === 'accepted' && (
+                          <button 
+                            onClick={() => setShowCompleteModal({ id: challenge.id, title: challenge.title, type: 'challenge' })}
+                            className="bg-emerald-500 text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
+                          >
+                            <CheckCircle2 size={18} />
+                            Concluir
+                          </button>
+                        )}
+                        
+                        {challenge.status === 'accepted' && viewMode === 'follower' && (
                           <div className="text-emerald-400 text-xs font-black uppercase tracking-widest flex items-center gap-2">
                             <CheckCircle2 size={16} />
                             Aceito
@@ -642,6 +815,60 @@ function App() {
                         )}
                       </div>
                     </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'videos' && (
+            <motion.div 
+              key="videos"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              <div className="space-y-1">
+                <h3 className="text-4xl font-black tracking-tighter italic text-white uppercase">VÍDEOS DOS DESAFIOS</h3>
+                <p className="text-zinc-500 text-xs font-black uppercase tracking-widest">Provas reais de que eu cumpro o que prometo</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                {completedVideos.length === 0 ? (
+                  <div className="col-span-full py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
+                    <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhum vídeo ainda</p>
+                  </div>
+                ) : (
+                  completedVideos.map(video => (
+                    <motion.div 
+                      key={video.id}
+                      className="bg-zinc-900/50 border border-zinc-800 rounded-[2.5rem] overflow-hidden group hover:border-emerald-500/30 transition-all"
+                    >
+                      <div className="aspect-video relative overflow-hidden">
+                        <img 
+                          src={video.thumbnail_url} 
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" 
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-zinc-950/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="w-16 h-16 bg-emerald-500 rounded-full flex items-center justify-center text-zinc-950 shadow-2xl">
+                            <Play size={32} fill="currentColor" />
+                          </div>
+                        </div>
+                        <div className="absolute bottom-4 left-4 right-4">
+                          <span className="bg-zinc-950/80 backdrop-blur-md text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest border border-white/10">
+                            {video.created_at ? new Date(video.created_at.seconds * 1000).toLocaleDateString() : 'Recent'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="p-6">
+                        <h4 className="text-lg font-black text-white mb-2 line-clamp-1">{video.title}</h4>
+                        <button className="text-emerald-400 text-xs font-black uppercase tracking-widest flex items-center gap-2 hover:text-emerald-300 transition-colors">
+                          Assistir Prova
+                        </button>
+                      </div>
+                    </motion.div>
                   ))
                 )}
               </div>
@@ -876,6 +1103,129 @@ function App() {
         )}
       </AnimatePresence>
 
+      {/* Post Modal */}
+      <AnimatePresence>
+        {showPostModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowPostModal(false)}
+              className="absolute inset-0 bg-zinc-950/80 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <h3 className="text-3xl font-black mb-8 tracking-tight">NOVA POSTAGEM</h3>
+              <form onSubmit={handleCreatePost} className="space-y-6">
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">O que está acontecendo?</label>
+                  <textarea 
+                    required
+                    value={newPost.content}
+                    onChange={e => setNewPost({...newPost, content: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all h-40 resize-none font-medium"
+                    placeholder="Compartilhe um desafio ou novidade..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL da Imagem (Opcional)</label>
+                  <input 
+                    type="text" 
+                    value={newPost.image_url}
+                    onChange={e => setNewPost({...newPost, image_url: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                    placeholder="https://exemplo.com/imagem.jpg"
+                  />
+                </div>
+                <div className="pt-6 flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => setShowPostModal(false)}
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
+                  >
+                    Postar
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Complete Challenge Modal */}
+      <AnimatePresence>
+        {showCompleteModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowCompleteModal(null)}
+              className="absolute inset-0 bg-zinc-950/80 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <h3 className="text-3xl font-black mb-2 tracking-tight">CONCLUIR DESAFIO</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">Envie o link do vídeo como prova da conclusão.</p>
+              
+              <form onSubmit={handleCompleteChallenge} className="space-y-6">
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL do Vídeo (YouTube/Vimeo/etc)</label>
+                  <input 
+                    required
+                    type="url" 
+                    value={completionData.video_url}
+                    onChange={e => setCompletionData({...completionData, video_url: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                    placeholder="https://youtube.com/watch?v=..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-zinc-500 uppercase tracking-widest mb-3">URL da Thumbnail (Opcional)</label>
+                  <input 
+                    type="url" 
+                    value={completionData.thumbnail_url}
+                    onChange={e => setCompletionData({...completionData, thumbnail_url: e.target.value})}
+                    className="w-full bg-zinc-950 border-2 border-zinc-800 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-all font-bold"
+                    placeholder="https://exemplo.com/thumb.jpg"
+                  />
+                </div>
+                <div className="pt-6 flex gap-4">
+                  <button 
+                    type="button"
+                    onClick={() => setShowCompleteModal(null)}
+                    className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20"
+                  >
+                    Salvar Prova
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Mobile Navigation */}
       <nav className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 bg-zinc-900/80 backdrop-blur-2xl border border-zinc-800 px-8 py-4 rounded-full flex items-center gap-10 shadow-2xl md:hidden">
         <button onClick={() => setActiveTab('feed')} className={`transition-all ${activeTab === 'feed' ? 'text-emerald-400 scale-125' : 'text-zinc-500'}`}>
@@ -886,6 +1236,9 @@ function App() {
         </button>
         <button onClick={() => setActiveTab('challenges')} className={`transition-all ${activeTab === 'challenges' ? 'text-emerald-400 scale-125' : 'text-zinc-500'}`}>
           <Zap size={24} />
+        </button>
+        <button onClick={() => setActiveTab('videos')} className={`transition-all ${activeTab === 'videos' ? 'text-emerald-400 scale-125' : 'text-zinc-500'}`}>
+          <Video size={24} />
         </button>
         <button onClick={() => setActiveTab('ranking')} className={`transition-all ${activeTab === 'ranking' ? 'text-emerald-400 scale-125' : 'text-zinc-500'}`}>
           <TrendingUp size={24} />

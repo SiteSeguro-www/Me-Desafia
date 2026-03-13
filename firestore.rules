@@ -14,6 +14,12 @@ service cloud.firestore {
     // Collection: challenges
     // Fields: creatorId, followerId, follower_username, title, description, price, total_raised, status, created_at
     //
+    // Collection: posts
+    // Fields: userId, username, display_name, avatar_url, content, image_url, likes, created_at
+    //
+    // Collection: completed_videos
+    // Fields: userId, challengeId, title, video_url, thumbnail_url, created_at
+    //
     // ===============================================================
 
     // ===============================================================
@@ -57,6 +63,20 @@ service cloud.firestore {
              data.status in ['pending', 'accepted', 'refused', 'paid'];
     }
 
+    function isValidPost(data) {
+      return data.keys().hasAll(['userId', 'content', 'likes']) &&
+             data.userId == request.auth.uid &&
+             data.content is string && data.content.size() > 0 && data.content.size() < 1000 &&
+             data.likes is number;
+    }
+
+    function isValidCompletedVideo(data) {
+      return data.keys().hasAll(['userId', 'challengeId', 'video_url', 'title']) &&
+             data.userId == request.auth.uid &&
+             data.video_url is string && isValidUrl(data.video_url) &&
+             data.title is string && data.title.size() > 0;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -93,6 +113,25 @@ service cloud.firestore {
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total_raised']) && 
          request.resource.data.total_raised > resource.data.total_raised)
       );
+    }
+
+    match /posts/{postId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidPost(request.resource.data);
+      allow update: if isAuthenticated() && (
+        // Owner can update content
+        (resource.data.userId == request.auth.uid && isValidPost(request.resource.data)) ||
+        // Anyone can like
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) && 
+         request.resource.data.likes == resource.data.likes + 1)
+      );
+    }
+
+    match /completed_videos/{videoId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidCompletedVideo(request.resource.data);
+      allow update: if isOwner(resource.data.userId) && isValidCompletedVideo(request.resource.data);
+      allow delete: if isOwner(resource.data.userId);
     }
   }
 }

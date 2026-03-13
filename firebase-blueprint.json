@@ -51,6 +51,36 @@
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["creatorId", "followerId", "title", "price", "status"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "A general post or challenge shared with the community",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "display_name": { "type": "string" },
+        "avatar_url": { "type": "string" },
+        "content": { "type": "string" },
+        "image_url": { "type": "string" },
+        "likes": { "type": "integer" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "content", "likes"]
+    },
+    "CompletedVideo": {
+      "title": "CompletedVideo",
+      "description": "A video proof of a completed challenge or task",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "challengeId": { "type": "string" },
+        "title": { "type": "string" },
+        "video_url": { "type": "string" },
+        "thumbnail_url": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "challengeId", "video_url", "title"]
     }
   },
   "firestore": {
@@ -65,6 +95,14 @@
     "/challenges/{challengeId}": {
       "schema": "Challenge",
       "description": "Challenges sent to creators"
+    },
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "General community posts"
+    },
+    "/completed_videos/{videoId}": {
+      "schema": "CompletedVideo",
+      "description": "Videos of completed challenges"
     }
   }
 }

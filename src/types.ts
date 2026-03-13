@@ -21,6 +21,7 @@ export interface Task {
   points: number;
   price: number;
   status: 'pending' | 'paid' | 'completed';
+  video_url?: string;
   created_at: any;
 }
 
@@ -33,7 +34,8 @@ export interface Challenge {
   description: string;
   price: number;
   total_raised: number;
-  status: 'pending' | 'accepted' | 'refused' | 'paid';
+  status: 'pending' | 'accepted' | 'refused' | 'paid' | 'completed';
+  video_url?: string;
   created_at: any;
 }
 
@@ -45,4 +47,26 @@ export interface RankingUser {
   challenges_completed: number;
   total_earned: number;
   follower_count: number;
+}
+
+export interface Post {
+  id: string;
+  userId: string;
+  username: string;
+  display_name: string;
+  avatar_url: string;
+  content: string;
+  image_url?: string;
+  likes: number;
+  created_at: any;
+}
+
+export interface CompletedVideo {
+  id: string;
+  userId: string;
+  challengeId: string;
+  title: string;
+  video_url: string;
+  thumbnail_url: string;
+  created_at: any;
 }
