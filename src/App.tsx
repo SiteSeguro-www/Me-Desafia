@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Task, Challenge, RankingUser, Post, CompletedVideo } from './types';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
 import { 
   auth, 
   db, 
@@ -50,10 +52,101 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY || '');
+
+function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCancel }: { 
+  amount: number, 
+  targetType: 'task' | 'challenge', 
+  targetId: string, 
+  username: string,
+  onSuccess: () => void,
+  onCancel: () => void
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!stripe || !elements) return;
+
+    setProcessing(true);
+    setError(null);
+
+    try {
+      const response = await fetch('/api/create-payment-intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, targetType, targetId, username }),
+      });
+      const { clientSecret, error: backendError } = await response.json();
+
+      if (backendError) throw new Error(backendError);
+
+      const result = await stripe.confirmCardPayment(clientSecret, {
+        payment_method: {
+          card: elements.getElement(CardElement)!,
+        },
+      });
+
+      if (result.error) {
+        setError(result.error.message || "Payment failed");
+      } else if (result.paymentIntent.status === 'succeeded') {
+        await fetch('/api/confirm-payment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paymentIntentId: result.paymentIntent.id }),
+        });
+        onSuccess();
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6">
+      <div className="bg-zinc-800 p-4 rounded-xl border border-zinc-700">
+        <CardElement options={{
+          style: {
+            base: {
+              fontSize: '16px',
+              color: '#fff',
+              '::placeholder': { color: '#71717a' },
+            },
+          },
+        }} />
+      </div>
+      {error && <div className="text-red-500 text-xs font-medium">{error}</div>}
+      <div className="flex gap-4">
+        <button 
+          type="button"
+          onClick={onCancel}
+          className="flex-1 bg-zinc-800 text-white py-3 rounded-xl font-bold"
+        >
+          Cancelar
+        </button>
+        <button 
+          type="submit" 
+          disabled={!stripe || processing}
+          className="flex-1 bg-emerald-500 text-zinc-950 py-3 rounded-xl font-black uppercase tracking-widest text-xs disabled:opacity-50"
+        >
+          {processing ? 'Processando...' : `Pagar R$ ${amount.toFixed(2)}`}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 export default function AppWrapper() {
   return (
     <ErrorBoundary>
-      <App />
+      <Elements stripe={stripePromise}>
+        <App />
+      </Elements>
     </ErrorBoundary>
   );
 }
@@ -74,6 +167,7 @@ function App() {
   const [showPostModal, setShowPostModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState<{amount: number, targetType: 'task' | 'challenge', targetId: string} | null>(null);
   const [showCompleteModal, setShowCompleteModal] = useState<{id: string, title: string, type: 'task' | 'challenge'} | null>(null);
   const [newTask, setNewTask] = useState({ title: '', description: '', price: '' });
   const [newChallenge, setNewChallenge] = useState({ title: '', description: '', price: '' });
@@ -283,34 +377,12 @@ function App() {
     }
   };
 
-  const handlePayment = async (taskId: string, price: number, creatorId: string) => {
-    // 5% platform fee
-    const platformFee = price * 0.05;
-    const creatorAmount = price - platformFee;
-    const path = `tasks/${taskId}`;
-    try {
-      await updateDoc(doc(db, 'tasks', taskId), { status: 'paid' });
-      await updateDoc(doc(db, 'users', creatorId), {
-        balance: increment(creatorAmount)
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
+  const handlePayment = async (taskId: string, price: number) => {
+    setShowPaymentModal({ amount: price, targetType: 'task', targetId: taskId });
   };
 
-  const handlePayChallenge = async (challengeId: string, amount: number, creatorId: string) => {
-    // 5% platform fee
-    const platformFee = amount * 0.05;
-    const creatorAmount = amount - platformFee;
-    const path = `challenges/${challengeId}`;
-    try {
-      await updateDoc(doc(db, 'challenges', challengeId), { status: 'paid' });
-      await updateDoc(doc(db, 'users', creatorId), {
-        balance: increment(creatorAmount)
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
+  const handlePayChallenge = async (challengeId: string, amount: number) => {
+    setShowPaymentModal({ amount: amount, targetType: 'challenge', targetId: challengeId });
   };
 
   const handleWithdraw = async (e: React.FormEvent) => {
@@ -417,10 +489,14 @@ function App() {
     const videosPath = 'completed_videos';
 
     try {
+      // 1. Update status to completed in Firestore
       await updateDoc(doc(db, collectionName, id), { 
         status: 'completed',
         video_url: 'LIVE_STREAM_COMPLETED'
       });
+
+      // 2. Call backend to process payout
+      await fetch(`/api/${collectionName}/${id}/complete`, { method: 'POST' });
 
       await addDoc(collection(db, videosPath), {
         userId: user.uid,
@@ -464,13 +540,16 @@ function App() {
     const videosPath = 'completed_videos';
 
     try {
-      // 1. Update status to completed
+      // 1. Update status to completed in Firestore
       await updateDoc(doc(db, collectionName, id), { 
         status: 'completed',
         video_url: completionData.video_url
       });
 
-      // 2. Add to completed videos collection
+      // 2. Call backend to process payout
+      await fetch(`/api/${collectionName}/${id}/complete`, { method: 'POST' });
+
+      // 3. Add to completed videos collection
       await addDoc(collection(db, videosPath), {
         userId: user.uid,
         challengeId: id,
@@ -710,7 +789,7 @@ function App() {
                       <div className="space-y-4 max-w-xs">
                         <div className="flex -space-x-3">
                           {[1,2,3,4].map(i => (
-                            <img key={i} src={`https://picsum.photos/seed/user${i}/40`} className="w-10 h-10 rounded-full border-2 border-zinc-900" referrerPolicy="no-referrer" />
+                            <img key={`avatar-${i}`} src={`https://picsum.photos/seed/user${i}/40`} className="w-10 h-10 rounded-full border-2 border-zinc-900" referrerPolicy="no-referrer" />
                           ))}
                           <div className="w-10 h-10 rounded-full bg-zinc-800 border-2 border-zinc-900 flex items-center justify-center text-[10px] font-bold">+1.4k</div>
                         </div>
@@ -844,7 +923,7 @@ function App() {
                         <div className="text-3xl font-black text-white tabular-nums">R$ {task.price.toFixed(2)}</div>
                         {viewMode === 'follower' && task.status === 'pending' && (
                           <button 
-                            onClick={() => handlePayment(task.id, task.price, task.creatorId)}
+                            onClick={() => handlePayment(task.id, task.price)}
                             className="bg-white text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all"
                           >
                             Pagar Agora
@@ -963,7 +1042,7 @@ function App() {
                         
                         {viewMode === 'follower' && challenge.status === 'accepted' && (
                           <button 
-                            onClick={() => handlePayChallenge(challenge.id, challenge.price + (challenge.total_raised || 0), challenge.creatorId)}
+                            onClick={() => handlePayChallenge(challenge.id, challenge.price + (challenge.total_raised || 0))}
                             className="bg-white text-zinc-950 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all"
                           >
                             Pagar Agora
@@ -1522,6 +1601,51 @@ function App() {
         )}
       </AnimatePresence>
 
+      {/* Payment Modal */}
+      <AnimatePresence>
+        {showPaymentModal && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowPaymentModal(null)}
+              className="absolute inset-0 bg-zinc-950/90 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500 mb-6">
+                <ShieldCheck size={32} />
+              </div>
+              <h3 className="text-3xl font-black mb-2 tracking-tight uppercase">Pagamento Seguro</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">
+                Seu pagamento será processado pelo Stripe e mantido em segurança até a conclusão da missão.
+              </p>
+
+              <CheckoutForm 
+                amount={showPaymentModal.amount}
+                targetType={showPaymentModal.targetType}
+                targetId={showPaymentModal.targetId}
+                username={user?.username || ''}
+                onSuccess={() => {
+                  setShowPaymentModal(null);
+                  // Optional: show success toast
+                }}
+                onCancel={() => setShowPaymentModal(null)}
+              />
+              
+              <p className="mt-6 text-center text-[10px] text-zinc-600 font-bold uppercase tracking-widest">
+                Powered by <span className="text-zinc-400">Stripe</span>
+              </p>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Complete Challenge Modal */}
       <AnimatePresence>
         {showCompleteModal && (
@@ -1708,7 +1832,7 @@ function App() {
                   { user: 'pedro_henrique', msg: 'Pagamento enviado! ✅' }
                 ].map((chat, i) => (
                   <motion.div 
-                    key={i}
+                    key={`chat-${i}`}
                     initial={{ opacity: 0, x: 20 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.5 }}

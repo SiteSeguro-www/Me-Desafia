@@ -3,9 +3,24 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import Database from "better-sqlite3";
 import { fileURLToPath } from "url";
+import Stripe from "stripe";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const db = new Database("taskpay.db");
+
+let stripeClient: Stripe | null = null;
+function getStripe() {
+  if (!stripeClient) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) {
+      // In development, we might not have the key yet
+      console.warn("STRIPE_SECRET_KEY is not set. Stripe features will fail.");
+      return null;
+    }
+    stripeClient = new Stripe(key);
+  }
+  return stripeClient;
+}
 
 // Initialize Database
 db.exec(`
@@ -15,6 +30,7 @@ db.exec(`
     display_name TEXT,
     bio TEXT,
     avatar_url TEXT,
+    balance REAL DEFAULT 0,
     is_live INTEGER DEFAULT 0
   );
 
@@ -24,7 +40,7 @@ db.exec(`
     title TEXT,
     description TEXT,
     price REAL,
-    status TEXT DEFAULT 'pending',
+    status TEXT DEFAULT 'pending', -- pending, paid, completed
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
@@ -45,7 +61,7 @@ db.exec(`
     description TEXT,
     price REAL,
     total_raised REAL DEFAULT 0,
-    status TEXT DEFAULT 'pending', -- pending, accepted, refused, paid
+    status TEXT DEFAULT 'pending', -- pending, accepted, refused, completed, paid
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(creator_id) REFERENCES users(id),
     FOREIGN KEY(follower_id) REFERENCES users(id)
@@ -53,12 +69,13 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER,
+    target_type TEXT, -- 'task' or 'challenge'
+    target_id INTEGER,
     payer_id INTEGER,
     amount REAL,
-    status TEXT DEFAULT 'completed',
+    stripe_payment_intent_id TEXT,
+    status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(task_id) REFERENCES tasks(id),
     FOREIGN KEY(payer_id) REFERENCES users(id)
   );
 `);
@@ -74,17 +91,6 @@ if (userCount.count === 0) {
     .run("creator2", "Aventureira", "Desafios extremos são comigo.", "https://picsum.photos/seed/creator2/200");
   db.prepare("INSERT INTO users (username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?)")
     .run("creator3", "Gamer Pro", "Duvido você me vencer.", "https://picsum.photos/seed/creator3/200");
-
-  // Add some initial tasks for ranking
-  db.prepare("INSERT INTO tasks (user_id, title, description, price, status) VALUES (1, 'Raspar o cabelo', 'Vou raspar se bater a meta', 120, 'pending')").run();
-  db.prepare("INSERT INTO tasks (user_id, title, description, price, status) VALUES (3, 'Pular de paraquedas', 'Meta para o próximo mês', 500, 'completed')").run();
-  db.prepare("INSERT INTO tasks (user_id, title, description, price, status) VALUES (4, 'Maratona 24h', 'Jogando sem parar', 300, 'completed')").run();
-  
-  // Add some followers
-  db.prepare("INSERT INTO followers (follower_id, following_id) VALUES (2, 1)").run();
-  db.prepare("INSERT INTO followers (follower_id, following_id) VALUES (2, 3)").run();
-  db.prepare("INSERT INTO followers (follower_id, following_id) VALUES (2, 4)").run();
-  db.prepare("INSERT INTO followers (follower_id, following_id) VALUES (1, 3)").run();
 }
 
 async function startServer() {
@@ -166,23 +172,6 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/payments", (req, res) => {
-    const { taskId, payerUsername, amount } = req.body;
-    const payer = db.prepare("SELECT id FROM users WHERE username = ?").get(payerUsername) as { id: number };
-    
-    db.prepare("INSERT INTO payments (task_id, payer_id, amount) VALUES (?, ?, ?)")
-      .run(taskId, payer.id, amount);
-    
-    db.prepare("UPDATE tasks SET status = 'paid' WHERE id = ?").run(taskId);
-    res.json({ success: true });
-  });
-
-  app.post("/api/challenges/:id/contribute", (req, res) => {
-    const { amount } = req.body;
-    db.prepare("UPDATE challenges SET total_raised = total_raised + ? WHERE id = ?").run(amount, req.params.id);
-    res.json({ success: true });
-  });
-
   app.get("/api/ranking", (req, res) => {
     const { sortBy } = req.query; // challenges_completed, total_earned, follower_count
     
@@ -197,13 +186,120 @@ async function startServer() {
         u.display_name, 
         u.avatar_url,
         (SELECT COUNT(*) FROM tasks t WHERE t.user_id = u.id AND t.status = 'completed') as challenges_completed,
-        (SELECT COALESCE(SUM(amount), 0) FROM payments p JOIN tasks t ON p.task_id = t.id WHERE t.user_id = u.id) as total_earned,
+        u.balance as total_earned,
         (SELECT COUNT(*) FROM followers f WHERE f.following_id = u.id) as follower_count
       FROM users u
       ORDER BY ${orderBy} DESC
       LIMIT 10
     `).all();
     res.json(ranking);
+  });
+
+  // Stripe Payments
+  app.post("/api/create-payment-intent", async (req, res) => {
+    const { amount, targetType, targetId, username } = req.body;
+    const stripe = getStripe();
+    if (!stripe) return res.status(500).json({ error: "Stripe not configured" });
+
+    const user = db.prepare("SELECT id FROM users WHERE username = ?").get(username) as { id: number };
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(amount * 100), // Stripe expects cents
+        currency: "brl",
+        metadata: {
+          targetType,
+          targetId,
+          userId: user.id.toString(),
+        },
+      });
+
+      // Record pending payment
+      db.prepare("INSERT INTO payments (target_type, target_id, payer_id, amount, stripe_payment_intent_id, status) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(targetType, targetId, user.id, amount, paymentIntent.id, 'pending');
+
+      res.json({ clientSecret: paymentIntent.client_secret });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/confirm-payment", async (req, res) => {
+    const { paymentIntentId } = req.body;
+    const stripe = getStripe();
+    if (!stripe) return res.status(500).json({ error: "Stripe not configured" });
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      if (paymentIntent.status === "succeeded") {
+        const { targetType, targetId } = paymentIntent.metadata;
+        
+        // Update payment status
+        db.prepare("UPDATE payments SET status = 'completed' WHERE stripe_payment_intent_id = ?")
+          .run(paymentIntentId);
+
+        if (targetType === 'task') {
+          db.prepare("UPDATE tasks SET status = 'paid' WHERE id = ?").run(targetId);
+        } else if (targetType === 'challenge') {
+          db.prepare("UPDATE challenges SET total_raised = total_raised + ? WHERE id = ?")
+            .run(paymentIntent.amount / 100, targetId);
+        }
+
+        res.json({ success: true });
+      } else {
+        res.status(400).json({ error: "Payment not succeeded" });
+      }
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Payout / Commission Logic
+  const processPayout = (targetType: 'task' | 'challenge', targetId: string, userId: number, amount: number) => {
+    const commission = amount * 0.05;
+    const netAmount = amount - commission;
+
+    if (targetType === 'task') {
+      db.prepare("UPDATE tasks SET status = 'completed' WHERE id = ?").run(targetId);
+    } else {
+      db.prepare("UPDATE challenges SET status = 'completed' WHERE id = ?").run(targetId);
+    }
+
+    db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(netAmount, userId);
+    return { netAmount, commission };
+  };
+
+  app.post("/api/tasks/:id/complete", (req, res) => {
+    const taskId = req.params.id;
+    const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as any;
+    if (!task || task.status !== 'paid') return res.status(400).json({ error: "Invalid task state" });
+
+    const result = processPayout('task', taskId, task.user_id, task.price);
+    res.json({ success: true, ...result });
+  });
+
+  app.post("/api/challenges/:id/complete", (req, res) => {
+    const challengeId = req.params.id;
+    const challenge = db.prepare("SELECT * FROM challenges WHERE id = ?").get(challengeId) as any;
+    if (!challenge || challenge.status !== 'accepted') return res.status(400).json({ error: "Invalid challenge state" });
+    if (challenge.total_raised <= 0) return res.status(400).json({ error: "No funds to payout" });
+
+    const recipientId = challenge.creator_id; 
+    const result = processPayout('challenge', challengeId, recipientId, challenge.total_raised);
+    res.json({ success: true, ...result });
+  });
+
+  app.post("/api/withdraw", (req, res) => {
+    const { username, amount, fee } = req.body;
+    const totalDeduction = amount + fee;
+    
+    const user = db.prepare("SELECT balance FROM users WHERE username = ?").get(username) as { balance: number };
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.balance < totalDeduction) return res.status(400).json({ error: "Insufficient balance" });
+
+    db.prepare("UPDATE users SET balance = balance - ? WHERE username = ?").run(totalDeduction, username);
+    res.json({ success: true });
   });
 
   // Vite middleware for development

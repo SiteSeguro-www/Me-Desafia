@@ -53,16 +53,18 @@ service cloud.firestore {
              data.creatorId is string &&
              data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
              data.price is number && data.price >= 0 &&
-             data.status in ['pending', 'paid', 'completed'];
+             data.status in ['pending', 'paid', 'completed'] &&
+             (!('video_url' in data) || (data.video_url is string));
     }
 
     function isValidChallenge(data) {
       return data.keys().hasAll(['creatorId', 'followerId', 'title', 'price', 'status']) &&
              data.creatorId is string &&
-             data.followerId == request.auth.uid &&
+             data.followerId is string &&
              data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
              data.price is number && data.price >= 0 &&
-             data.status in ['pending', 'accepted', 'refused', 'paid'];
+             data.status in ['pending', 'accepted', 'refused', 'paid', 'completed'] &&
+             (!('video_url' in data) || (data.video_url is string));
     }
 
     function isValidPost(data) {
@@ -75,7 +77,7 @@ service cloud.firestore {
     function isValidCompletedVideo(data) {
       return data.keys().hasAll(['userId', 'challengeId', 'video_url', 'title']) &&
              data.userId == request.auth.uid &&
-             data.video_url is string && isValidUrl(data.video_url) &&
+             data.video_url is string &&
              data.title is string && data.title.size() > 0;
     }
 
@@ -92,7 +94,9 @@ service cloud.firestore {
         (isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.email == resource.data.email) ||
         // Others can increment balance (for payments)
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance']) && 
-         request.resource.data.balance >= resource.data.balance)
+         request.resource.data.balance >= resource.data.balance) ||
+        // Others can increment points/completedTasks (when completing a task)
+        (request.resource.data.diff(resource.data).affectedKeys().hasAny(['points', 'completedTasks']))
       );
     }
 
@@ -103,7 +107,9 @@ service cloud.firestore {
         // Creator can update status (e.g. to completed)
         (resource.data.creatorId == request.auth.uid && isValidTask(request.resource.data)) ||
         // Follower can update status to 'paid'
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && request.resource.data.status == 'paid')
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && request.resource.data.status == 'paid') ||
+        // Allow updating status and video_url together
+        (resource.data.creatorId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'video_url']) && request.resource.data.status == 'completed')
       );
     }
 
@@ -111,9 +117,10 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && request.resource.data.followerId == request.auth.uid && isValidChallenge(request.resource.data);
       allow update: if isAuthenticated() && (
-        // Creator can accept/refuse
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && 
-         request.resource.data.status in ['accepted', 'refused']) ||
+        // Creator (challenged) can accept/refuse/complete
+        (resource.data.creatorId == request.auth.uid && isValidChallenge(request.resource.data)) ||
+        // Follower (challenger) can update status to 'paid'
+        (resource.data.followerId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && request.resource.data.status == 'paid') ||
         // Anyone can contribute (increment total_raised)
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['total_raised']) && 
          request.resource.data.total_raised > resource.data.total_raised)
