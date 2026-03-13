@@ -1,0 +1,8 @@
+{
+  "name": "MeDesafia",
+  "description": "Pague e veja se eu consigo cumprir.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

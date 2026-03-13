@@ -1,0 +1,70 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "display_name": { "type": "string" },
+        "email": { "type": "string" },
+        "bio": { "type": "string" },
+        "avatar_url": { "type": "string" },
+        "role": { "type": "string", "enum": ["creator", "follower"] },
+        "points": { "type": "integer" },
+        "balance": { "type": "number" },
+        "followers": { "type": "integer" },
+        "completedTasks": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "display_name", "email", "role"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A task created by a creator",
+      "type": "object",
+      "properties": {
+        "creatorId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "points": { "type": "integer" },
+        "price": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "paid", "completed"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["creatorId", "title", "price", "status"]
+    },
+    "Challenge": {
+      "title": "Challenge",
+      "description": "A challenge sent by a follower to a creator",
+      "type": "object",
+      "properties": {
+        "creatorId": { "type": "string" },
+        "followerId": { "type": "string" },
+        "follower_username": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "total_raised": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "refused", "paid"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["creatorId", "followerId", "title", "price", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Tasks created by creators"
+    },
+    "/challenges/{challengeId}": {
+      "schema": "Challenge",
+      "description": "Challenges sent to creators"
+    }
+  }
+}
