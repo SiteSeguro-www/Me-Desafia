@@ -22,7 +22,9 @@ import {
   increment,
   serverTimestamp,
   handleFirestoreError,
-  OperationType
+  OperationType,
+  limit,
+  getDocs
 } from './firebase';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { 
@@ -263,43 +265,31 @@ function App() {
   const [showSearchResults, setShowSearchResults] = useState(false);
 
   useEffect(() => {
-    if (user) {
-      fetch('/api/users/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          uid: user.uid,
-          username: user.username,
-          display_name: user.display_name,
-          bio: user.bio,
-          avatar_url: user.avatar_url,
-          followers: user.followers,
-          completedTasks: user.completedTasks,
-          role: user.role,
-          role_selected: user.role_selected
-        })
-      }).catch(err => console.error("Error syncing user:", err));
-    }
+    // Sync is now handled entirely via Firestore listeners and updates.
   }, [user]);
 
   useEffect(() => {
-    const delayDebounceFn = setTimeout(() => {
+    const delayDebounceFn = setTimeout(async () => {
       if (searchQuery.trim()) {
         setIsSearching(true);
-        fetch(`/api/users/search?q=${searchQuery}`)
-          .then(res => {
-            if (!res.ok) throw new Error(`Server error: ${res.status}`);
-            return res.json();
-          })
-          .then(data => {
-            setSearchResults(data);
-            setIsSearching(false);
-            setShowSearchResults(true);
-          })
-          .catch(err => {
-            console.error("Search error:", err);
-            setIsSearching(false);
-          });
+        try {
+          const usersRef = collection(db, 'users');
+          const q = query(usersRef, limit(50));
+          const snapshot = await getDocs(q);
+          const allUsers = snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as User));
+          const lowerQuery = searchQuery.toLowerCase();
+          const results = allUsers.filter(u => 
+            u.username?.toLowerCase().includes(lowerQuery) || 
+            u.display_name?.toLowerCase().includes(lowerQuery)
+          ).slice(0, 10);
+          
+          setSearchResults(results);
+          setShowSearchResults(true);
+        } catch (err) {
+          console.error("Search error:", err);
+        } finally {
+          setIsSearching(false);
+        }
       } else {
         setSearchResults([]);
         setShowSearchResults(false);
@@ -601,13 +591,6 @@ function App() {
         balance: increment(-totalDeduction)
       });
 
-      // 2. Update Backend
-      await fetch('/api/withdraw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: user.username, amount, fee }),
-      });
-
       setWithdrawStatus({ type: 'success', message: `Saque de R$ ${amount.toFixed(2)} solicitado com sucesso! Taxa de R$ 2,00 aplicada.` });
       setWithdrawAmount('');
       setTimeout(() => {
@@ -689,8 +672,17 @@ function App() {
         video_url: 'LIVE_STREAM_COMPLETED'
       });
 
-      // 2. Call backend to process payout
-      await fetch(`/api/${collectionName}/${id}/complete`, { method: 'POST' });
+      // 2. Process payout
+      const item = type === 'task' ? tasks.find(t => t.id === id) : challenges.find(c => c.id === id);
+      if (item) {
+        const amount = type === 'task' ? (item as Task).price : (item as Challenge).total_raised;
+        const netAmount = amount * 0.95; // 5% commission
+        const recipientId = type === 'task' ? (item as Task).creatorId : (item as Challenge).creatorId;
+        
+        await updateDoc(doc(db, 'users', recipientId), {
+          balance: increment(netAmount)
+        });
+      }
 
       await addDoc(collection(db, videosPath), {
         userId: user.uid,
@@ -740,8 +732,17 @@ function App() {
         video_url: completionData.video_url
       });
 
-      // 2. Call backend to process payout
-      await fetch(`/api/${collectionName}/${id}/complete`, { method: 'POST' });
+      // 2. Process payout
+      const item = type === 'task' ? tasks.find(t => t.id === id) : challenges.find(c => c.id === id);
+      if (item) {
+        const amount = type === 'task' ? (item as Task).price : (item as Challenge).total_raised;
+        const netAmount = amount * 0.95; // 5% commission
+        const recipientId = type === 'task' ? (item as Task).creatorId : (item as Challenge).creatorId;
+        
+        await updateDoc(doc(db, 'users', recipientId), {
+          balance: increment(netAmount)
+        });
+      }
 
       // 3. Add to completed videos collection
       await addDoc(collection(db, videosPath), {
@@ -850,15 +851,18 @@ function App() {
                         {searchResults.map((res) => (
                           <button 
                             key={res.username}
-                            onClick={() => {
-                              // Fetch full user data and set as viewedUser
-                              fetch(`/api/users/${res.username}`)
-                                .then(r => r.json())
-                                .then(data => {
-                                  setViewedUser(data);
-                                  setShowSearchResults(false);
-                                  setSearchQuery('');
-                                });
+                            onClick={async () => {
+                              try {
+                                const q = query(collection(db, 'users'), where('username', '==', res.username), limit(1));
+                                const snapshot = await getDocs(q);
+                                if (!snapshot.empty) {
+                                  setViewedUser({ uid: snapshot.docs[0].id, ...snapshot.docs[0].data() } as User);
+                                }
+                                setShowSearchResults(false);
+                                setSearchQuery('');
+                              } catch (err) {
+                                console.error("Error fetching user:", err);
+                              }
                             }}
                             className="w-full p-3 flex items-center gap-3 hover:bg-zinc-800 transition-colors text-left"
                           >
