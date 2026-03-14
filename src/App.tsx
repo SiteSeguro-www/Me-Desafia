@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Task, Challenge, RankingUser, Post, CompletedVideo } from './types';
 import { loadStripe } from '@stripe/stripe-js';
-import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import { Elements, PaymentElement, useStripe, useElements } from '@stripe/react-stripe-js';
 import { 
   auth, 
   db, 
@@ -48,7 +48,8 @@ import {
   Play,
   Settings,
   Radio,
-  Camera
+  Camera,
+  Search
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -59,6 +60,89 @@ function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCan
   targetType: 'task' | 'challenge', 
   targetId: string, 
   username: string,
+  onSuccess: () => void,
+  onCancel: () => void
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [processing, setProcessing] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [payerName, setPayerName] = useState('');
+  const [payerEmail, setPayerEmail] = useState('');
+  const [step, setStep] = useState<'info' | 'payment'>('info');
+
+  const handleInitPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payerName || !payerEmail) {
+      setError("Por favor, preencha nome e email.");
+      return;
+    }
+    setProcessing(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/create-payment-intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount, targetType, targetId, username, payerName, payerEmail }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      setClientSecret(data.clientSecret);
+      setStep('payment');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  if (step === 'info') {
+    return (
+      <form onSubmit={handleInitPayment} className="space-y-6">
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2 block">Nome Completo</label>
+            <input 
+              type="text" 
+              required
+              value={payerName}
+              onChange={(e) => setPayerName(e.target.value)}
+              className="w-full bg-zinc-800 border-none rounded-xl p-4 text-white focus:ring-2 focus:ring-emerald-500"
+              placeholder="Seu nome"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2 block">Email</label>
+            <input 
+              type="email" 
+              required
+              value={payerEmail}
+              onChange={(e) => setPayerEmail(e.target.value)}
+              className="w-full bg-zinc-800 border-none rounded-xl p-4 text-white focus:ring-2 focus:ring-emerald-500"
+              placeholder="seu@email.com"
+            />
+          </div>
+        </div>
+        {error && <div className="text-red-500 text-xs font-medium">{error}</div>}
+        <div className="flex gap-4">
+          <button type="button" onClick={onCancel} className="flex-1 bg-zinc-800 text-white py-3 rounded-xl font-bold">Cancelar</button>
+          <button type="submit" disabled={processing} className="flex-1 bg-emerald-500 text-zinc-950 py-3 rounded-xl font-black uppercase tracking-widest text-xs">
+            {processing ? 'Iniciando...' : 'Próximo'}
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  return (
+    <Elements stripe={stripePromise} options={{ clientSecret: clientSecret!, appearance: { theme: 'night' } }}>
+      <PaymentForm amount={amount} clientSecret={clientSecret!} onSuccess={onSuccess} onCancel={onCancel} />
+    </Elements>
+  );
+}
+
+function PaymentForm({ amount, clientSecret, onSuccess, onCancel }: { 
+  amount: number, 
+  clientSecret: string,
   onSuccess: () => void,
   onCancel: () => void
 }) {
@@ -75,24 +159,25 @@ function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCan
     setError(null);
 
     try {
-      const response = await fetch('/api/create-payment-intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount, targetType, targetId, username }),
-      });
-      const { clientSecret, error: backendError } = await response.json();
+      const { error: submitError } = await elements.submit();
+      if (submitError) {
+        setError(submitError.message || "Erro na submissão");
+        setProcessing(false);
+        return;
+      }
 
-      if (backendError) throw new Error(backendError);
-
-      const result = await stripe.confirmCardPayment(clientSecret, {
-        payment_method: {
-          card: elements.getElement(CardElement)!,
+      const result = await stripe.confirmPayment({
+        elements,
+        clientSecret,
+        confirmParams: {
+          return_url: window.location.href,
         },
+        redirect: 'if_required',
       });
 
       if (result.error) {
-        setError(result.error.message || "Payment failed");
-      } else if (result.paymentIntent.status === 'succeeded') {
+        setError(result.error.message || "Pagamento falhou");
+      } else if (result.paymentIntent && result.paymentIntent.status === 'succeeded') {
         await fetch('/api/confirm-payment', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -109,17 +194,7 @@ function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCan
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      <div className="bg-zinc-800 p-4 rounded-xl border border-zinc-700">
-        <CardElement options={{
-          style: {
-            base: {
-              fontSize: '16px',
-              color: '#fff',
-              '::placeholder': { color: '#71717a' },
-            },
-          },
-        }} />
-      </div>
+      <PaymentElement />
       {error && <div className="text-red-500 text-xs font-medium">{error}</div>}
       <div className="flex gap-4">
         <button 
@@ -127,7 +202,7 @@ function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCan
           onClick={onCancel}
           className="flex-1 bg-zinc-800 text-white py-3 rounded-xl font-bold"
         >
-          Cancelar
+          Voltar
         </button>
         <button 
           type="submit" 
@@ -144,9 +219,7 @@ function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCan
 export default function AppWrapper() {
   return (
     <ErrorBoundary>
-      <Elements stripe={stripePromise}>
-        <App />
-      </Elements>
+      <App />
     </ErrorBoundary>
   );
 }
@@ -179,7 +252,58 @@ function App() {
   const [completionMethod, setCompletionMethod] = useState<'video' | 'live'>('video');
   const [showLivePanel, setShowLivePanel] = useState(false);
   const [viewMode, setViewMode] = useState<'creator' | 'follower'>('creator');
+  const [viewedUser, setViewedUser] = useState<User | null>(null);
   const videoRef = React.useRef<HTMLVideoElement>(null);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSearchResults, setShowSearchResults] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      fetch('/api/users/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: user.uid,
+          username: user.username,
+          display_name: user.display_name,
+          bio: user.bio,
+          avatar_url: user.avatar_url,
+          followers: user.followers,
+          completedTasks: user.completedTasks
+        })
+      }).catch(err => console.error("Error syncing user:", err));
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      if (searchQuery.trim()) {
+        setIsSearching(true);
+        fetch(`/api/users/search?q=${searchQuery}`)
+          .then(res => {
+            if (!res.ok) throw new Error(`Server error: ${res.status}`);
+            return res.json();
+          })
+          .then(data => {
+            setSearchResults(data);
+            setIsSearching(false);
+            setShowSearchResults(true);
+          })
+          .catch(err => {
+            console.error("Search error:", err);
+            setIsSearching(false);
+          });
+      } else {
+        setSearchResults([]);
+        setShowSearchResults(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery]);
 
   useEffect(() => {
     if (showLivePanel) {
@@ -574,6 +698,8 @@ function App() {
     }
   };
 
+  const displayUser = viewedUser || user;
+
   if (loading) return <div className="flex items-center justify-center h-screen bg-zinc-950 text-white font-mono">INITIALIZING_SYSTEM...</div>;
 
   if (!user) {
@@ -607,12 +733,18 @@ function App() {
       <header className="sticky top-0 z-40 bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-900">
         <div className="max-w-4xl mx-auto px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-8">
-            <h1 className="text-2xl font-black tracking-tighter flex items-center gap-2 italic">
+            <h1 
+              onClick={() => {
+                setActiveTab('feed');
+                setViewedUser(null);
+              }}
+              className="text-2xl font-black tracking-tighter flex items-center gap-2 italic cursor-pointer"
+            >
               <Zap className="text-emerald-400 fill-emerald-400" size={28} />
               MEDESAFIA
             </h1>
             <nav className="hidden md:flex items-center gap-6">
-              <button onClick={() => setActiveTab('feed')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'feed' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Feed</button>
+              <button onClick={() => { setActiveTab('feed'); setViewedUser(null); }} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'feed' && !viewedUser ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Feed</button>
               <button onClick={() => setActiveTab('tasks')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'tasks' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Minhas Missões</button>
               <button onClick={() => setActiveTab('challenges')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'challenges' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Duvido Você?</button>
               <button onClick={() => setActiveTab('videos')} className={`text-sm font-bold uppercase tracking-widest transition-colors ${activeTab === 'videos' ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'}`}>Vídeos</button>
@@ -620,8 +752,65 @@ function App() {
             </nav>
           </div>
           
-            <div className="flex items-center gap-4">
-              {viewMode === 'follower' && (
+          <div className="flex items-center gap-4">
+            {/* Search Bar */}
+            <div className="relative hidden lg:block">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={16} />
+                <input 
+                  type="text"
+                  placeholder="Buscar perfis..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onFocus={() => setShowSearchResults(true)}
+                  className="bg-zinc-900 border border-zinc-800 rounded-full pl-10 pr-4 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all"
+                />
+              </div>
+              
+              <AnimatePresence>
+                {showSearchResults && (searchQuery.trim() || isSearching) && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    className="absolute top-full left-0 right-0 mt-2 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden z-50"
+                  >
+                    {isSearching ? (
+                      <div className="p-4 text-center text-zinc-500 text-xs font-mono">BUSCANDO...</div>
+                    ) : searchResults.length > 0 ? (
+                      <div className="max-h-80 overflow-y-auto">
+                        {searchResults.map((res) => (
+                          <button 
+                            key={res.username}
+                            onClick={() => {
+                              // Fetch full user data and set as viewedUser
+                              fetch(`/api/users/${res.username}`)
+                                .then(r => r.json())
+                                .then(data => {
+                                  setViewedUser(data);
+                                  setShowSearchResults(false);
+                                  setSearchQuery('');
+                                });
+                            }}
+                            className="w-full p-3 flex items-center gap-3 hover:bg-zinc-800 transition-colors text-left"
+                          >
+                            <img src={res.avatar_url} className="w-10 h-10 rounded-xl object-cover" alt="" />
+                            <div>
+                              <p className="text-sm font-bold text-white">{res.display_name}</p>
+                              <p className="text-xs text-zinc-500">@{res.username}</p>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-4 text-center text-zinc-500 text-xs">Nenhum perfil encontrado</div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {viewMode === 'follower' && (
                 <button 
                   onClick={() => setShowChallengeModal(true)}
                   className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all shadow-[0_0_20px_rgba(16,185,129,0.5)] animate-bounce"
@@ -670,8 +859,8 @@ function App() {
             <div className="relative">
               <div className="w-32 h-32 rounded-[2rem] overflow-hidden border-4 border-zinc-800 shadow-2xl rotate-3 group-hover:rotate-0 transition-transform duration-500">
                 <img 
-                  src={user.avatar_url} 
-                  alt={user.display_name}
+                  src={displayUser.avatar_url} 
+                  alt={displayUser.display_name}
                   className="w-full h-full object-cover"
                   referrerPolicy="no-referrer"
                 />
@@ -684,24 +873,35 @@ function App() {
             </div>
               <div className="flex-1 text-center sm:text-left z-10">
                 <div className="flex items-center justify-center sm:justify-start gap-3 mb-2">
-                  <h2 className="text-3xl font-black tracking-tight">{user.display_name}</h2>
+                  <h2 className="text-3xl font-black tracking-tight">{displayUser.display_name}</h2>
                   <ShieldCheck className="text-emerald-400" size={20} />
                 </div>
-                <p className="text-zinc-500 font-mono text-sm mb-4 tracking-tight">@{user.username}</p>
-                <p className="text-zinc-300 leading-relaxed text-lg font-medium max-w-md">Pague e veja se eu consigo cumprir.</p>
+                <p className="text-zinc-500 font-mono text-sm mb-4 tracking-tight">@{displayUser.username}</p>
+                <p className="text-zinc-300 leading-relaxed text-lg font-medium max-w-md">{displayUser.bio || 'Pague e veja se eu consigo cumprir.'}</p>
                 
                 <div className="mt-6 flex flex-wrap gap-3 justify-center sm:justify-start">
-                  <div className="bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-2xl">
-                    <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Saldo Disponível</p>
-                    <p className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</p>
-                  </div>
-                  <button 
-                    onClick={() => setShowWithdrawModal(true)}
-                    className="bg-white text-zinc-950 px-6 py-2 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
-                  >
-                    <DollarSign size={16} />
-                    Sacar
-                  </button>
+                  {!viewedUser ? (
+                    <>
+                      <div className="bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-2xl">
+                        <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Saldo Disponível</p>
+                        <p className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</p>
+                      </div>
+                      <button 
+                        onClick={() => setShowWithdrawModal(true)}
+                        className="bg-white text-zinc-950 px-6 py-2 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2"
+                      >
+                        <DollarSign size={16} />
+                        Sacar
+                      </button>
+                    </>
+                  ) : (
+                    <button 
+                      className="bg-emerald-500 text-zinc-950 px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-emerald-400 transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/20"
+                    >
+                      <Users size={16} />
+                      Seguir
+                    </button>
+                  )}
                 </div>
               </div>
           </div>
@@ -711,7 +911,7 @@ function App() {
             <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-[2rem] flex items-center justify-between group">
               <div>
                 <p className="text-zinc-500 text-xs font-black uppercase tracking-widest mb-1">Seguidores</p>
-                <p className="text-3xl font-black tabular-nums">{user.followers}</p>
+                <p className="text-3xl font-black tabular-nums">{displayUser.followers || 0}</p>
               </div>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
                 <Users size={24} />
@@ -719,8 +919,8 @@ function App() {
             </div>
             <div className="bg-zinc-900/50 border border-zinc-800 p-6 rounded-[2rem] flex items-center justify-between group">
               <div>
-                <p className="text-zinc-500 text-xs font-black uppercase tracking-widest mb-1">Ganhos</p>
-                <p className="text-3xl font-black tabular-nums">R$ {user.balance.toFixed(0)}</p>
+                <p className="text-zinc-500 text-xs font-black uppercase tracking-widest mb-1">Missões</p>
+                <p className="text-3xl font-black tabular-nums">{displayUser.completedTasks || 0}</p>
               </div>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-400 group-hover:scale-110 transition-transform">
                 <TrendingUp size={24} />
@@ -821,12 +1021,12 @@ function App() {
               {/* Posts Section */}
               <div className="space-y-6">
                 <h4 className="text-sm font-black text-zinc-500 uppercase tracking-widest">Postagens Recentes</h4>
-                {posts.length === 0 ? (
+                {(viewedUser ? posts.filter(p => p.userId === displayUser.uid) : posts).length === 0 ? (
                   <div className="py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
                     <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhuma postagem ainda</p>
                   </div>
                 ) : (
-                  posts.map(post => (
+                  (viewedUser ? posts.filter(p => p.userId === displayUser.uid) : posts).map(post => (
                     <motion.div 
                       key={post.id}
                       initial={{ opacity: 0, scale: 0.95 }}
@@ -897,12 +1097,12 @@ function App() {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {tasks.length === 0 ? (
+                {tasks.filter(t => t.creatorId === displayUser.uid).length === 0 ? (
                   <div className="py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
-                    <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhum desafio ativo</p>
+                    <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhuma missão ativa</p>
                   </div>
                 ) : (
-                  tasks.map(task => (
+                  tasks.filter(t => t.creatorId === displayUser.uid).map(task => (
                     <div key={task.id} className="bg-zinc-900/50 border border-zinc-800 p-8 rounded-[2.5rem] flex flex-col sm:flex-row items-center sm:items-start justify-between gap-6 group hover:border-emerald-500/50 transition-all">
                       <div className="flex-1 text-center sm:text-left">
                         <div className="flex items-center justify-center sm:justify-start gap-3 mb-3">
@@ -970,12 +1170,12 @@ function App() {
               </div>
 
               <div className="grid grid-cols-1 gap-4">
-                {challenges.length === 0 ? (
+                {challenges.filter(c => c.creatorId === displayUser.uid).length === 0 ? (
                   <div className="py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
                     <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhum desafio recebido</p>
                   </div>
                 ) : (
-                  challenges.map(challenge => (
+                  challenges.filter(c => c.creatorId === displayUser.uid).map(challenge => (
                     <div key={challenge.id} className="bg-zinc-900/50 border border-zinc-800 p-8 rounded-[2.5rem] flex flex-col sm:flex-row items-center sm:items-start justify-between gap-6 group hover:border-emerald-500/50 transition-all">
                       <div className="flex-1 text-center sm:text-left">
                         <div className="flex items-center justify-center sm:justify-start gap-3 mb-3">
@@ -1102,12 +1302,12 @@ function App() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                {completedVideos.length === 0 ? (
+                {completedVideos.filter(v => v.userId === displayUser.uid).length === 0 ? (
                   <div className="col-span-full py-20 text-center bg-zinc-900/30 rounded-[2rem] border border-zinc-800">
                     <p className="text-zinc-500 font-bold uppercase tracking-widest">Nenhum vídeo ainda</p>
                   </div>
                 ) : (
-                  completedVideos.map(video => (
+                  completedVideos.filter(v => v.userId === displayUser.uid).map(video => (
                     <motion.div 
                       key={video.id}
                       className="bg-zinc-900/50 border border-zinc-800 rounded-[2.5rem] overflow-hidden group hover:border-emerald-500/30 transition-all"

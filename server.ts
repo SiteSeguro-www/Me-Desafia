@@ -23,14 +23,30 @@ function getStripe() {
 }
 
 // Initialize Database
+try {
+  const tableInfo = db.prepare("PRAGMA table_info(users)").all() as any[];
+  if (tableInfo.length > 0) {
+    const hasUid = tableInfo.some(col => col.name === 'uid');
+    if (!hasUid) db.exec("ALTER TABLE users ADD COLUMN uid TEXT UNIQUE");
+    const hasFollowers = tableInfo.some(col => col.name === 'followers');
+    if (!hasFollowers) {
+      db.exec("ALTER TABLE users ADD COLUMN followers INTEGER DEFAULT 0");
+      db.exec("ALTER TABLE users ADD COLUMN completed_tasks INTEGER DEFAULT 0");
+    }
+  }
+} catch (e) {}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT UNIQUE,
     username TEXT UNIQUE,
     display_name TEXT,
     bio TEXT,
     avatar_url TEXT,
     balance REAL DEFAULT 0,
+    followers INTEGER DEFAULT 0,
+    completed_tasks INTEGER DEFAULT 0,
     is_live INTEGER DEFAULT 0
   );
 
@@ -72,6 +88,8 @@ db.exec(`
     target_type TEXT, -- 'task' or 'challenge'
     target_id INTEGER,
     payer_id INTEGER,
+    payer_name TEXT,
+    payer_email TEXT,
     amount REAL,
     stripe_payment_intent_id TEXT,
     status TEXT DEFAULT 'pending',
@@ -83,14 +101,14 @@ db.exec(`
 // Seed some data if empty
 const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
 if (userCount.count === 0) {
-  db.prepare("INSERT INTO users (username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?)")
-    .run("admin", "Task Master", "I do things for money.", "https://picsum.photos/seed/admin/200");
-  db.prepare("INSERT INTO users (username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?)")
-    .run("user1", "John Doe", "Just watching.", "https://picsum.photos/seed/user1/200");
-  db.prepare("INSERT INTO users (username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?)")
-    .run("creator2", "Aventureira", "Desafios extremos são comigo.", "https://picsum.photos/seed/creator2/200");
-  db.prepare("INSERT INTO users (username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?)")
-    .run("creator3", "Gamer Pro", "Duvido você me vencer.", "https://picsum.photos/seed/creator3/200");
+  db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?, ?)")
+    .run("admin-uid", "admin", "Task Master", "I do things for money.", "https://picsum.photos/seed/admin/200");
+  db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?, ?)")
+    .run("user1-uid", "user1", "John Doe", "Just watching.", "https://picsum.photos/seed/user1/200");
+  db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?, ?)")
+    .run("creator2-uid", "creator2", "Aventureira", "Desafios extremos são comigo.", "https://picsum.photos/seed/creator2/200");
+  db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url) VALUES (?, ?, ?, ?, ?)")
+    .run("creator3-uid", "creator3", "Gamer Pro", "Duvido você me vencer.", "https://picsum.photos/seed/creator3/200");
 }
 
 async function startServer() {
@@ -100,8 +118,37 @@ async function startServer() {
   app.use(express.json());
 
   // API Routes
+  app.get("/api/users/search", (req, res) => {
+    const query = req.query.q;
+    if (!query) return res.json([]);
+    const users = db.prepare("SELECT uid, username, display_name, avatar_url, bio, followers, completed_tasks as completedTasks FROM users WHERE username LIKE ? OR display_name LIKE ? LIMIT 10")
+      .all(`%${query}%`, `%${query}%`);
+    res.json(users);
+  });
+
+  app.post("/api/users/sync", (req, res) => {
+    const { uid, username, display_name, bio, avatar_url, followers, completedTasks } = req.body;
+    
+    // Try to find by UID first
+    let existing = db.prepare("SELECT id FROM users WHERE uid = ?").get(uid) as { id: number } | undefined;
+    
+    // If not found by UID, try by username (for legacy users)
+    if (!existing) {
+      existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username) as { id: number } | undefined;
+    }
+
+    if (existing) {
+      db.prepare("UPDATE users SET uid = ?, username = ?, display_name = ?, bio = ?, avatar_url = ?, followers = ?, completed_tasks = ? WHERE id = ?")
+        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0, existing.id);
+    } else {
+      db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url, followers, completed_tasks) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0);
+    }
+    res.json({ success: true });
+  });
+
   app.get("/api/users/:username", (req, res) => {
-    const user = db.prepare("SELECT * FROM users WHERE username = ?").get(req.params.username);
+    const user = db.prepare("SELECT uid, username, display_name, bio, avatar_url, balance, followers, completed_tasks as completedTasks FROM users WHERE username = ?").get(req.params.username);
     if (!user) return res.status(404).json({ error: "User not found" });
     res.json(user);
   });
@@ -197,7 +244,7 @@ async function startServer() {
 
   // Stripe Payments
   app.post("/api/create-payment-intent", async (req, res) => {
-    const { amount, targetType, targetId, username } = req.body;
+    const { amount, targetType, targetId, username, payerName, payerEmail } = req.body;
     const stripe = getStripe();
     if (!stripe) return res.status(500).json({ error: "Stripe not configured" });
 
@@ -208,16 +255,21 @@ async function startServer() {
       const paymentIntent = await stripe.paymentIntents.create({
         amount: Math.round(amount * 100), // Stripe expects cents
         currency: "brl",
+        automatic_payment_methods: {
+          enabled: true,
+        },
         metadata: {
           targetType,
           targetId,
           userId: user.id.toString(),
+          payerName,
+          payerEmail
         },
       });
 
       // Record pending payment
-      db.prepare("INSERT INTO payments (target_type, target_id, payer_id, amount, stripe_payment_intent_id, status) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(targetType, targetId, user.id, amount, paymentIntent.id, 'pending');
+      db.prepare("INSERT INTO payments (target_type, target_id, payer_id, payer_name, payer_email, amount, stripe_payment_intent_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(targetType, targetId, user.id, payerName, payerEmail, amount, paymentIntent.id, 'pending');
 
       res.json({ clientSecret: paymentIntent.client_secret });
     } catch (e: any) {
