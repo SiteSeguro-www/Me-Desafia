@@ -6,6 +6,7 @@ export interface User {
   bio: string;
   avatar_url: string;
   role: 'creator' | 'follower';
+  role_selected?: boolean;
   points: number;
   balance: number;
   followers: number;

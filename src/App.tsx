@@ -239,6 +239,8 @@ function App() {
   const [showChallengeModal, setShowChallengeModal] = useState(false);
   const [showPostModal, setShowPostModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showAddCreditsModal, setShowAddCreditsModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState<{amount: number, targetType: 'task' | 'challenge', targetId: string} | null>(null);
   const [showCompleteModal, setShowCompleteModal] = useState<{id: string, title: string, type: 'task' | 'challenge'} | null>(null);
@@ -272,7 +274,9 @@ function App() {
           bio: user.bio,
           avatar_url: user.avatar_url,
           followers: user.followers,
-          completedTasks: user.completedTasks
+          completedTasks: user.completedTasks,
+          role: user.role,
+          role_selected: user.role_selected
         })
       }).catch(err => console.error("Error syncing user:", err));
     }
@@ -328,7 +332,11 @@ function App() {
         try {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
-            setUser(userDoc.data() as User);
+            const userData = userDoc.data() as User;
+            setUser(userData);
+            if (!userData.role_selected) {
+              setShowOnboarding(true);
+            }
           } else {
             const newUser: User = {
               uid: firebaseUser.uid,
@@ -338,6 +346,7 @@ function App() {
               bio: 'Novo no MeDesafia!',
               avatar_url: firebaseUser.photoURL || `https://picsum.photos/seed/${firebaseUser.uid}/200`,
               role: 'follower',
+              role_selected: false,
               points: 0,
               balance: 0,
               followers: 0,
@@ -346,6 +355,7 @@ function App() {
             };
             await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
             setUser(newUser);
+            setShowOnboarding(true);
           }
         } catch (error) {
           handleFirestoreError(error, OperationType.GET, `users/${firebaseUser.uid}`);
@@ -423,14 +433,25 @@ function App() {
       handleFirestoreError(error, OperationType.LIST, videosPath);
     });
 
+    // Listen to current user data
+    const userPath = `users/${user.uid}`;
+    const unsubUser = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
+      if (snapshot.exists()) {
+        setUser(snapshot.data() as User);
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, userPath);
+    });
+
     return () => {
+      unsubUser();
       unsubTasks();
       unsubChallenges();
       unsubRanking();
       unsubPosts();
       unsubVideos();
     };
-  }, [user]);
+  }, [user?.uid]);
 
   const handleLogin = async () => {
     try {
@@ -507,6 +528,61 @@ function App() {
 
   const handlePayChallenge = async (challengeId: string, amount: number) => {
     setShowPaymentModal({ amount: amount, targetType: 'challenge', targetId: challengeId });
+  };
+
+  const handleSelectRole = async (role: 'creator' | 'follower') => {
+    if (!user) return;
+    const path = `users/${user.uid}`;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        role,
+        role_selected: true
+      });
+      setShowOnboarding(false);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handleAddCredits = async (amount: number) => {
+    if (!user) return;
+    const path = `users/${user.uid}`;
+    try {
+      await updateDoc(doc(db, 'users', user.uid), {
+        balance: increment(amount)
+      });
+      setShowAddCreditsModal(false);
+      // In a real app, this would be called after a successful Stripe payment
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const handlePayWithBalance = async (amount: number, targetType: 'task' | 'challenge', targetId: string) => {
+    if (!user) return;
+    if (user.balance < amount) {
+      alert("Saldo insuficiente. Adicione créditos para continuar.");
+      return;
+    }
+
+    const path = `users/${user.uid}`;
+    try {
+      // 1. Deduct from user balance
+      await updateDoc(doc(db, 'users', user.uid), {
+        balance: increment(-amount)
+      });
+
+      // 2. Update target status
+      if (targetType === 'task') {
+        await updateDoc(doc(db, 'tasks', targetId), { status: 'paid' });
+      } else {
+        await updateDoc(doc(db, 'challenges', targetId), { status: 'paid' });
+      }
+
+      setShowPaymentModal(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
   };
 
   const handleWithdraw = async (e: React.FormEvent) => {
@@ -882,9 +958,18 @@ function App() {
                 <div className="mt-6 flex flex-wrap gap-3 justify-center sm:justify-start">
                   {!viewedUser ? (
                     <>
-                      <div className="bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-2xl">
-                        <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Saldo Disponível</p>
-                        <p className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</p>
+                      <div className="bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 rounded-2xl flex items-center gap-4">
+                        <div>
+                          <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Saldo Disponível</p>
+                          <p className="text-xl font-black text-white">R$ {user.balance.toFixed(2)}</p>
+                        </div>
+                        <button 
+                          onClick={() => setShowAddCreditsModal(true)}
+                          className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 p-2 rounded-xl transition-all"
+                          title="Adicionar Créditos"
+                        >
+                          <Plus size={20} />
+                        </button>
                       </div>
                       <button 
                         onClick={() => setShowWithdrawModal(true)}
@@ -1828,6 +1913,23 @@ function App() {
                 Seu pagamento será processado pelo Stripe e mantido em segurança até a conclusão da missão.
               </p>
 
+              {user && user.balance >= showPaymentModal.amount && (
+                <div className="mb-8">
+                  <button 
+                    onClick={() => handlePayWithBalance(showPaymentModal.amount, showPaymentModal.targetType, showPaymentModal.targetId)}
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 mb-4"
+                  >
+                    <DollarSign size={18} />
+                    Pagar com Saldo (R$ {showPaymentModal.amount.toFixed(2)})
+                  </button>
+                  <div className="flex items-center gap-2 justify-center">
+                    <div className="h-px flex-1 bg-zinc-800" />
+                    <span className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">Ou use cartão</span>
+                    <div className="h-px flex-1 bg-zinc-800" />
+                  </div>
+                </div>
+              )}
+
               <CheckoutForm 
                 amount={showPaymentModal.amount}
                 targetType={showPaymentModal.targetType}
@@ -2046,6 +2148,114 @@ function App() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Onboarding Modal */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-zinc-950/95 backdrop-blur-2xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-2xl bg-zinc-900 border border-zinc-800 rounded-[4rem] p-12 shadow-2xl text-center"
+            >
+              <div className="w-20 h-20 bg-emerald-500/10 rounded-3xl flex items-center justify-center text-emerald-500 mx-auto mb-8">
+                <Zap size={40} />
+              </div>
+              <h2 className="text-5xl font-black mb-4 tracking-tighter uppercase italic">BEM-VINDO AO MEDESAFIA!</h2>
+              <p className="text-zinc-400 text-lg font-medium mb-12 max-w-md mx-auto">
+                Para começar, escolha como você deseja interagir na plataforma. Você pode mudar isso depois.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <button 
+                  onClick={() => handleSelectRole('creator')}
+                  className="group relative bg-zinc-950 border-2 border-zinc-800 hover:border-emerald-500 p-8 rounded-[3rem] transition-all text-left overflow-hidden"
+                >
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 blur-3xl -mr-16 -mt-16 group-hover:bg-emerald-500/10 transition-colors" />
+                  <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-500 mb-6 group-hover:scale-110 transition-transform">
+                    <Camera size={24} />
+                  </div>
+                  <h3 className="text-2xl font-black mb-2 uppercase italic">CRIADOR</h3>
+                  <p className="text-zinc-500 text-sm font-medium leading-relaxed">
+                    Quero receber desafios, postar vídeos e ganhar dinheiro cumprindo missões.
+                  </p>
+                </button>
+
+                <button 
+                  onClick={() => handleSelectRole('follower')}
+                  className="group relative bg-zinc-950 border-2 border-zinc-800 hover:border-blue-500 p-8 rounded-[3rem] transition-all text-left overflow-hidden"
+                >
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 blur-3xl -mr-16 -mt-16 group-hover:bg-blue-500/10 transition-colors" />
+                  <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-500 mb-6 group-hover:scale-110 transition-transform">
+                    <Users size={24} />
+                  </div>
+                  <h3 className="text-2xl font-black mb-2 uppercase italic">SEGUIDOR</h3>
+                  <p className="text-zinc-500 text-sm font-medium leading-relaxed">
+                    Quero desafiar meus criadores favoritos e participar de leilões épicos.
+                  </p>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Add Credits Modal */}
+      <AnimatePresence>
+        {showAddCreditsModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAddCreditsModal(false)}
+              className="absolute inset-0 bg-zinc-950/80 backdrop-blur-xl"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-[3rem] p-10 shadow-2xl"
+            >
+              <h3 className="text-3xl font-black mb-2 tracking-tight uppercase">ADICIONAR CRÉDITOS</h3>
+              <p className="text-zinc-500 text-sm font-medium mb-8">Escolha um valor para recarregar seu saldo.</p>
+
+              <div className="grid grid-cols-2 gap-4 mb-8">
+                {[10, 20, 50, 100].map(amount => (
+                  <button 
+                    key={amount}
+                    onClick={() => handleAddCredits(amount)}
+                    className="bg-zinc-950 border-2 border-zinc-800 hover:border-emerald-500 p-6 rounded-3xl transition-all group"
+                  >
+                    <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1 group-hover:text-emerald-500">Recarregar</p>
+                    <p className="text-2xl font-black text-white">R$ {amount}</p>
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-4">
+                <div className="p-4 bg-emerald-500/5 border border-emerald-500/10 rounded-2xl flex items-center gap-3">
+                  <ShieldCheck className="text-emerald-500" size={20} />
+                  <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Pagamento 100% Seguro</p>
+                </div>
+                <button 
+                  onClick={() => setShowAddCreditsModal(false)}
+                  className="w-full bg-zinc-800 hover:bg-zinc-700 text-white font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </motion.div>
           </div>
         )}
       </AnimatePresence>

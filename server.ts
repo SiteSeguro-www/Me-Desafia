@@ -33,8 +33,17 @@ try {
       db.exec("ALTER TABLE users ADD COLUMN followers INTEGER DEFAULT 0");
       db.exec("ALTER TABLE users ADD COLUMN completed_tasks INTEGER DEFAULT 0");
     }
+    const hasRole = tableInfo.some(col => col.name === 'role');
+    if (!hasRole) {
+      db.exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'follower'");
+      db.exec("ALTER TABLE users ADD COLUMN role_selected INTEGER DEFAULT 0");
+    }
+    const hasIsLive = tableInfo.some(col => col.name === 'is_live');
+    if (!hasIsLive) db.exec("ALTER TABLE users ADD COLUMN is_live INTEGER DEFAULT 0");
   }
-} catch (e) {}
+} catch (e) {
+  console.error("Migration error:", e);
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -47,6 +56,8 @@ db.exec(`
     balance REAL DEFAULT 0,
     followers INTEGER DEFAULT 0,
     completed_tasks INTEGER DEFAULT 0,
+    role TEXT DEFAULT 'follower',
+    role_selected INTEGER DEFAULT 0,
     is_live INTEGER DEFAULT 0
   );
 
@@ -127,7 +138,7 @@ async function startServer() {
   });
 
   app.post("/api/users/sync", (req, res) => {
-    const { uid, username, display_name, bio, avatar_url, followers, completedTasks } = req.body;
+    const { uid, username, display_name, bio, avatar_url, followers, completedTasks, role, role_selected } = req.body;
     
     // Try to find by UID first
     let existing = db.prepare("SELECT id FROM users WHERE uid = ?").get(uid) as { id: number } | undefined;
@@ -138,11 +149,11 @@ async function startServer() {
     }
 
     if (existing) {
-      db.prepare("UPDATE users SET uid = ?, username = ?, display_name = ?, bio = ?, avatar_url = ?, followers = ?, completed_tasks = ? WHERE id = ?")
-        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0, existing.id);
+      db.prepare("UPDATE users SET uid = ?, username = ?, display_name = ?, bio = ?, avatar_url = ?, followers = ?, completed_tasks = ?, role = ?, role_selected = ? WHERE id = ?")
+        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0, role || 'follower', role_selected ? 1 : 0, existing.id);
     } else {
-      db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url, followers, completed_tasks) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0);
+      db.prepare("INSERT INTO users (uid, username, display_name, bio, avatar_url, followers, completed_tasks, role, role_selected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(uid, username, display_name, bio, avatar_url, followers || 0, completedTasks || 0, role || 'follower', role_selected ? 1 : 0);
     }
     res.json({ success: true });
   });
