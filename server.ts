@@ -307,6 +307,10 @@ async function startServer() {
         } else if (targetType === 'challenge') {
           db.prepare("UPDATE challenges SET total_raised = total_raised + ? WHERE id = ?")
             .run(paymentIntent.amount / 100, targetId);
+        } else if (targetType === 'credits') {
+          // targetId is the user's uid
+          db.prepare("UPDATE users SET balance = balance + ? WHERE uid = ?")
+            .run(paymentIntent.amount / 100, targetId);
         }
 
         res.json({ success: true });

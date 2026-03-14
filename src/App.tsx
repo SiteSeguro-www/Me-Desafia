@@ -57,7 +57,7 @@ const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY || '');
 
 function CheckoutForm({ amount, targetType, targetId, username, onSuccess, onCancel }: { 
   amount: number, 
-  targetType: 'task' | 'challenge', 
+  targetType: 'task' | 'challenge' | 'credits', 
   targetId: string, 
   username: string,
   onSuccess: () => void,
@@ -242,7 +242,7 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showAddCreditsModal, setShowAddCreditsModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
-  const [showPaymentModal, setShowPaymentModal] = useState<{amount: number, targetType: 'task' | 'challenge', targetId: string} | null>(null);
+  const [showPaymentModal, setShowPaymentModal] = useState<{amount: number, targetType: 'task' | 'challenge' | 'credits', targetId: string} | null>(null);
   const [showCompleteModal, setShowCompleteModal] = useState<{id: string, title: string, type: 'task' | 'challenge'} | null>(null);
   const [newTask, setNewTask] = useState({ title: '', description: '', price: '' });
   const [newChallenge, setNewChallenge] = useState({ title: '', description: '', price: '' });
@@ -546,16 +546,8 @@ function App() {
 
   const handleAddCredits = async (amount: number) => {
     if (!user) return;
-    const path = `users/${user.uid}`;
-    try {
-      await updateDoc(doc(db, 'users', user.uid), {
-        balance: increment(amount)
-      });
-      setShowAddCreditsModal(false);
-      // In a real app, this would be called after a successful Stripe payment
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
+    setShowAddCreditsModal(false);
+    setShowPaymentModal({ amount, targetType: 'credits', targetId: user.uid });
   };
 
   const handlePayWithBalance = async (amount: number, targetType: 'task' | 'challenge', targetId: string) => {
@@ -1913,10 +1905,10 @@ function App() {
                 Seu pagamento será processado pelo Stripe e mantido em segurança até a conclusão da missão.
               </p>
 
-              {user && user.balance >= showPaymentModal.amount && (
+              {user && showPaymentModal.targetType !== 'credits' && user.balance >= showPaymentModal.amount && (
                 <div className="mb-8">
                   <button 
-                    onClick={() => handlePayWithBalance(showPaymentModal.amount, showPaymentModal.targetType, showPaymentModal.targetId)}
+                    onClick={() => handlePayWithBalance(showPaymentModal.amount, showPaymentModal.targetType as 'task' | 'challenge', showPaymentModal.targetId)}
                     className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black py-4 rounded-2xl transition-all uppercase tracking-widest text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 mb-4"
                   >
                     <DollarSign size={18} />
@@ -1935,9 +1927,23 @@ function App() {
                 targetType={showPaymentModal.targetType}
                 targetId={showPaymentModal.targetId}
                 username={user?.username || ''}
-                onSuccess={() => {
+                onSuccess={async () => {
+                  if (user) {
+                    if (showPaymentModal.targetType === 'credits') {
+                      await updateDoc(doc(db, 'users', user.uid), {
+                        balance: increment(showPaymentModal.amount)
+                      });
+                    } else if (showPaymentModal.targetType === 'task') {
+                      await updateDoc(doc(db, 'tasks', showPaymentModal.targetId), {
+                        status: 'paid'
+                      });
+                    } else if (showPaymentModal.targetType === 'challenge') {
+                      await updateDoc(doc(db, 'challenges', showPaymentModal.targetId), {
+                        total_raised: increment(showPaymentModal.amount)
+                      });
+                    }
+                  }
                   setShowPaymentModal(null);
-                  // Optional: show success toast
                 }}
                 onCancel={() => setShowPaymentModal(null)}
               />
