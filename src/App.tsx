@@ -404,9 +404,18 @@ function App() {
 
     const path = `users/${user.uid}`;
     try {
+      // 1. Update Firestore
       await updateDoc(doc(db, 'users', user.uid), {
         balance: increment(-totalDeduction)
       });
+
+      // 2. Update Backend
+      await fetch('/api/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user.username, amount, fee }),
+      });
+
       setWithdrawStatus({ type: 'success', message: `Saque de R$ ${amount.toFixed(2)} solicitado com sucesso! Taxa de R$ 2,00 aplicada.` });
       setWithdrawAmount('');
       setTimeout(() => {
@@ -420,14 +429,7 @@ function App() {
   };
 
   const handleContribute = async (challengeId: string, amount: number) => {
-    const path = `challenges/${challengeId}`;
-    try {
-      await updateDoc(doc(db, 'challenges', challengeId), {
-        total_raised: increment(amount)
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
-    }
+    setShowPaymentModal({ amount: amount, targetType: 'challenge', targetId: challengeId });
   };
 
   const handleCreatePost = async (e: React.FormEvent) => {
